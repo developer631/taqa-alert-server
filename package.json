@@ -1,0 +1,17 @@
+{
+  "name": "taqa-alert-server",
+  "version": "1.0.0",
+  "description": "خادم تنبيهات طاقة",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "firebase-admin": "^11.11.0",
+    "node-fetch": "^2.7.0"
+  },
+  "engines": {
+    "node": "18"
+  }
+}
