@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// طاقة - Alert Server  v2.3
+// طاقة - Alert Server  v2.4
 // OneSignal Push + Wawp v2 WhatsApp API + Firebase Realtime DB
 // ═══════════════════════════════════════════════════════════
 
@@ -69,16 +69,15 @@ async function sendWA(phone, message) {
   const chatId = cleanPhone + "@c.us";
 
   try {
-    const params = new URLSearchParams({
-      instance_id: WAWP_INSTANCE,
-      access_token: WAWP_TOKEN,
-    });
-    const url = `https://api.wawp.net/v2/send/text?${params.toString()}`;
-
-    const res = await fetch(url, {
+    const res = await fetch("https://api.wawp.net/v2/send/text", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${WAWP_TOKEN}`,
+      },
       body: JSON.stringify({
+        instance_id: WAWP_INSTANCE,
+        access_token: WAWP_TOKEN,
         chatId: chatId,
         message: message,
       }),
@@ -98,6 +97,57 @@ async function sendWA(phone, message) {
     console.error("❌ WA error:", e.message);
     return { ok: false, error: e.message };
   }
+}
+
+async function tryAllMethods(phone, message) {
+  const cleanPhone = String(phone).replace(/[\s\-\+]/g, "").replace(/^00/, "").replace(/@c\.us$/, "");
+  const chatId = cleanPhone + "@c.us";
+  const results = {};
+
+  try {
+    const r = await fetch("https://api.wawp.net/v2/send/text", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${WAWP_TOKEN}` },
+      body: JSON.stringify({ instance_id: WAWP_INSTANCE, access_token: WAWP_TOKEN, chatId, message }),
+    });
+    results.A_v2_bearer_body = { status: r.status, body: (await r.text()).substring(0, 200) };
+  } catch (e) { results.A_v2_bearer_body = { error: e.message }; }
+
+  try {
+    const r = await fetch("https://api.wawp.net/v2/send/text", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instance_id: WAWP_INSTANCE, access_token: WAWP_TOKEN, chatId, message }),
+    });
+    results.B_v2_body_only = { status: r.status, body: (await r.text()).substring(0, 200) };
+  } catch (e) { results.B_v2_body_only = { error: e.message }; }
+
+  try {
+    const params = new URLSearchParams({ instance_id: WAWP_INSTANCE, access_token: WAWP_TOKEN });
+    const r = await fetch(`https://api.wawp.net/v2/send/text?${params}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chatId, message }),
+    });
+    results.C_v2_query_only = { status: r.status, body: (await r.text()).substring(0, 200) };
+  } catch (e) { results.C_v2_query_only = { error: e.message }; }
+
+  try {
+    const r = await fetch("https://app.wawp.net/api/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ number: cleanPhone, type: "text", message, instance_id: WAWP_INSTANCE, access_token: WAWP_TOKEN }),
+    });
+    results.D_legacy_app = { status: r.status, body: (await r.text()).substring(0, 200) };
+  } catch (e) { results.D_legacy_app = { error: e.message }; }
+
+  try {
+    const params = new URLSearchParams({ instance_id: WAWP_INSTANCE, access_token: WAWP_TOKEN, chatId: cleanPhone, message });
+    const r = await fetch(`https://wawp.net/wp-json/awp/v1/send?${params}`, { method: "POST" });
+    results.E_wp_json = { status: r.status, body: (await r.text()).substring(0, 200) };
+  } catch (e) { results.E_wp_json = { error: e.message }; }
+
+  return results;
 }
 
 async function checkAlerts() {
@@ -142,39 +192,29 @@ async function checkAlerts() {
       if (mins >= 120 && !alerted[key120]) {
         const title = "🚨 تجاوز 120 دقيقة";
         const body = `${feeder}  ${office}\nالانقطاع: ${outageTime}`;
-
         await sendOSNotif(title, body, office);
-
         if (WA_TARGET) {
-          const waMsg =
-            "🚨 *تنبيه تأخر انقطاع*\n\n" +
-            `📍 المكتب: ${office}\n` +
-            `🔌 المغذي: ${feeder}\n` +
+          const waMsg = "🚨 *تنبيه تأخر انقطاع*\n\n" +
+            `📍 المكتب: ${office}\n` + `🔌 المغذي: ${feeder}\n` +
             `🕐 وقت الانقطاع: ${outageTime}\n` +
             `⏱️ المدة: ${Math.floor(mins / 60)} ساعة ${mins % 60} دقيقة\n\n` +
             "⚠️ البلاغ تجاوز ساعتين ولم يُكتمل بعد";
           await sendWA(WA_TARGET, waMsg);
         }
-
         newAlerted[key120] = Date.now();
       }
       else if (mins >= 80 && !alerted[key80]) {
         const title = "⚠️ تجاوز 80 دقيقة";
         const body = `${feeder}  ${office}\nالانقطاع: ${outageTime}`;
-
         await sendOSNotif(title, body, office);
-
         if (WA_TARGET) {
-          const waMsg =
-            "⚠️ *تنبيه تأخر انقطاع*\n\n" +
-            `📍 المكتب: ${office}\n` +
-            `🔌 المغذي: ${feeder}\n` +
+          const waMsg = "⚠️ *تنبيه تأخر انقطاع*\n\n" +
+            `📍 المكتب: ${office}\n` + `🔌 المغذي: ${feeder}\n` +
             `🕐 وقت الانقطاع: ${outageTime}\n` +
             `⏱️ المدة: ${mins} دقيقة\n\n` +
             "⚠️ البلاغ تجاوز 80 دقيقة";
           await sendWA(WA_TARGET, waMsg);
         }
-
         newAlerted[key80] = Date.now();
       }
     }
@@ -192,15 +232,9 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "2.3",
+    version: "2.4",
     time: new Date().toISOString(),
-    endpoints: [
-      "GET  /         - health check",
-      "GET  /config   - check environment config",
-      "GET  /check    - run outage check manually",
-      "GET  /test-wa  - send test WhatsApp message",
-      "POST /send-wa  - send custom WhatsApp message",
-    ],
+    endpoints: ["GET /", "GET /config", "GET /check", "GET /test-wa", "GET /diag-wa", "POST /send-wa"],
   });
 });
 
@@ -220,39 +254,25 @@ app.get("/check", async (req, res) => {
 });
 
 app.get("/test-wa", async (req, res) => {
-  if (!WA_TARGET) {
-    return res.status(400).json({
-      ok: false,
-      error: "WA_TARGET environment variable not set",
-    });
-  }
-
-  const testMessage =
-    "🧪 *اختبار طاقة*\n\n" +
+  if (!WA_TARGET) return res.status(400).json({ ok: false, error: "WA_TARGET not set" });
+  const testMessage = "🧪 *اختبار طاقة*\n\n" +
     "✅ السيرفر متصل بـ Wawp\n" +
     "✅ Firebase: " + (db ? "متصل" : "غير متصل") + "\n" +
-    "🕐 الوقت: " +
-    new Date().toLocaleString("ar-SA", { timeZone: "Asia/Riyadh" }) +
+    "🕐 الوقت: " + new Date().toLocaleString("ar-SA", { timeZone: "Asia/Riyadh" }) +
     "\n\nإذا وصلتك هذي الرسالة، فإن الربط يعمل ✅";
-
   const result = await sendWA(WA_TARGET, testMessage);
-  res.json({
-    ok: result.ok,
-    target: WA_TARGET,
-    result,
-  });
+  res.json({ ok: result.ok, target: WA_TARGET, result });
+});
+
+app.get("/diag-wa", async (req, res) => {
+  if (!WA_TARGET) return res.status(400).json({ ok: false, error: "WA_TARGET not set" });
+  const results = await tryAllMethods(WA_TARGET, "🧪 طاقة diag test");
+  res.json({ target: WA_TARGET, instance: WAWP_INSTANCE, methods: results });
 });
 
 app.post("/send-wa", async (req, res) => {
   const { phone, message } = req.body || {};
-
-  if (!phone || !message) {
-    return res.status(400).json({
-      ok: false,
-      error: "phone and message are required in JSON body",
-    });
-  }
-
+  if (!phone || !message) return res.status(400).json({ ok: false, error: "phone and message required" });
   const result = await sendWA(phone, message);
   res.json(result);
 });
@@ -261,7 +281,7 @@ app.use((req, res) => {
   res.status(404).json({
     ok: false,
     error: `route not found: ${req.method} ${req.path}`,
-    available: ["/", "/config", "/check", "/test-wa", "/send-wa"],
+    available: ["/", "/config", "/check", "/test-wa", "/diag-wa", "/send-wa"],
   });
 });
 
