@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════
-// طاقة - Alert Server  v2.2
-// OneSignal Push + Wawp WhatsApp + Firebase Realtime DB
+// طاقة - Alert Server  v2.3
+// OneSignal Push + Wawp v2 WhatsApp API + Firebase Realtime DB
 // ═══════════════════════════════════════════════════════════
 
 const express = require("express");
@@ -66,17 +66,21 @@ async function sendWA(phone, message) {
     .replace(/[\s\-\+]/g, "")
     .replace(/^00/, "")
     .replace(/@c\.us$/, "");
+  const chatId = cleanPhone + "@c.us";
 
   try {
-    const res = await fetch("https://app.wawp.net/api/send", {
+    const params = new URLSearchParams({
+      instance_id: WAWP_INSTANCE,
+      access_token: WAWP_TOKEN,
+    });
+    const url = `https://api.wawp.net/v2/send/text?${params.toString()}`;
+
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        number: cleanPhone,
-        type: "text",
+        chatId: chatId,
         message: message,
-        instance_id: WAWP_INSTANCE,
-        access_token: WAWP_TOKEN,
       }),
     });
 
@@ -88,7 +92,7 @@ async function sendWA(phone, message) {
       data = { raw: text.substring(0, 300) };
     }
 
-    console.log(`📤 WA → ${cleanPhone}: ${res.status}`, JSON.stringify(data).substring(0, 300));
+    console.log(`📤 WA → ${chatId}: ${res.status}`, JSON.stringify(data).substring(0, 300));
     return { ok: res.ok, status: res.status, data };
   } catch (e) {
     console.error("❌ WA error:", e.message);
@@ -188,7 +192,7 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "2.2",
+    version: "2.3",
     time: new Date().toISOString(),
     endpoints: [
       "GET  /         - health check",
