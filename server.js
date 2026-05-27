@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════
-// طاقة - Alert Server  v2.8
-// عرض ذكي للبلاغات (محطة/باص/مغذي) + تحسين الرسالة
+// طاقة - Alert Server  v2.9
+// + معلومات المفتاح الذكي في رسائل التنبيه
 // ═══════════════════════════════════════════════════════════
 
 const express = require("express");
@@ -34,6 +34,14 @@ const WA_TARGET = process.env.WA_TARGET || "";
 
 const ALERT_THRESHOLDS = [80, 120];
 const RIYADH_OFFSET_MS = 3 * 3600 * 1000;
+
+// خريطة حالات المفتاح الذكي
+const SK_STATUS_MAP = {
+  ok: "✅ يعمل",
+  not_responding: "🔴 لا يستجيب",
+  offline: "🟠 أوف لاين",
+  not_in_zenon: "🟡 غير مضاف بنظام الزنون",
+};
 
 async function sendOSNotif(title, body, office) {
   const filters = office ? [{ field: "tag", key: "office", relation: "=", value: office }] : null;
@@ -137,6 +145,9 @@ function extractReport(id, raw, source) {
     stationId: data.stationId || raw.stationId,
     feederName: data.feederName || raw.feederName,
     feederId: data.feederId || raw.feederId,
+    // v2.9: المفتاح الذكي
+    smartKey: data.smartKey || raw.smartKey,
+    smartKeyStatus: data.smartKeyStatus || raw.smartKeyStatus,
     busNumber: busNumber,
     busNumbers: buses,
     affectedAreas: data.affectedAreas || raw.affectedAreas || data.areas || raw.areas,
@@ -175,6 +186,15 @@ function formatOutageDetails(r) {
     if (r.feederName) lines.push(`🔌 المغذي: ${r.feederName}`);
     if (r.busNumber) lines.push(`⚡ الباص: B${r.busNumber}`);
   }
+
+  // v2.9: المفتاح الذكي (لبلاغات المغذي فقط)
+  if (type === "feeder" && (r.smartKey || r.smartKeyStatus)) {
+    const skLabel = r.smartKey ? `SK#${r.smartKey}` : "";
+    const skStatus = SK_STATUS_MAP[r.smartKeyStatus] || "";
+    const skParts = [skLabel, skStatus].filter(Boolean).join(" — ");
+    if (skParts) lines.push(`🔑 المفتاح الذكي: ${skParts}`);
+  }
+
   return lines.join("\n");
 }
 
@@ -222,7 +242,14 @@ async function checkAlerts() {
       const title = `${emoji} تجاوز ${threshold} دقيقة`;
       const outageDetails = formatOutageDetails(r);
 
-      console.log(`${emoji} ALERT: id=${r.id} office=${r.office} type=${r.outageType} mins=${mins} threshold=${threshold} [${r.source}]`);
+      // تحذير المفتاح الذكي
+      let smartKeyWarning = "";
+      if (r.outageType === "feeder" &&
+          (r.smartKeyStatus === "not_responding" || r.smartKeyStatus === "offline")) {
+        smartKeyWarning = `\n🔧 *تنبيه: يستلزم تدخل ميداني* (المفتاح الذكي غير متجاوب)\n`;
+      }
+
+      console.log(`${emoji} ALERT: id=${r.id} office=${r.office} type=${r.outageType} mins=${mins} threshold=${threshold} sk=${r.smartKeyStatus || "-"} [${r.source}]`);
 
       const pushBody = `${r.office || "-"}\nالانقطاع: ${r.outageTime} (${durationText})`;
       await sendOSNotif(title, pushBody, r.office);
@@ -237,6 +264,7 @@ async function checkAlerts() {
           `👥 المتأثرين: ${r.totalAffected || "-"} | المتبقي: ${r.remainingCount !== undefined ? r.remainingCount : "—"}\n` +
           (r.sensitive ? `🔴 مشتركون حساسون: ${r.sensitive}\n` : "") +
           (r.reason ? `📋 السبب: ${r.reason}\n` : "") +
+          smartKeyWarning +
           `\n⚠️ البلاغ تجاوز ${threshold} دقيقة ولم يُكتمل بعد`;
         await sendWA(WA_TARGET, waMsg);
       }
@@ -267,10 +295,13 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "2.8",
+    version: "2.9",
     time: new Date().toISOString(),
-    timeRiyadh: new Date(Date.now() + RIYADH_OFFSET_MS).toISOString().replace("Z", "+03:00"),
-    thresholds: ALERT_THRESHOLDS,
+    features: [
+      "✅ Smart key info in alerts",
+      "✅ Field-team warning when SK not responding",
+      "✅ Asia/Riyadh timezone",
+    ],
     endpoints: ["GET /", "GET /config", "GET /check", "GET /reports", "GET /test-wa", "POST /send-wa"],
   });
 });
@@ -354,8 +385,8 @@ setInterval(checkAlerts, 5 * 60 * 1000);
 setTimeout(checkAlerts, 5000);
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server v2.8 running on port ${PORT}`);
+  console.log(`🚀 Server v2.9 running on port ${PORT}`);
   console.log(`🌍 Timezone: Asia/Riyadh (UTC+3)`);
-  console.log(`📂 Reads from: reports/ + reports2/outages/`);
+  console.log(`🔑 Smart key feature enabled`);
   console.log(`📞 WA_TARGET: ${WA_TARGET || "(not set)"}`);
 });
