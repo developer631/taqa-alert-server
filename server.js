@@ -1,6 +1,7 @@
 // ═══════════════════════════════════════════════════════════
-// طاقة - Alert Server  v2.4
-// OneSignal Push + Wawp v2 WhatsApp API + Firebase Realtime DB
+// طاقة - Alert Server  v2.6
+// يقرأ من المسارين: reports/ (قديم) + reports2/outages (جديد)
+// OneSignal Push + Wawp v2 WhatsApp + Firebase Realtime DB
 // ═══════════════════════════════════════════════════════════
 
 const express = require("express");
@@ -32,42 +33,31 @@ const WAWP_INSTANCE = process.env.WAWP_INSTANCE_ID || "0666F2942346";
 const WAWP_TOKEN = process.env.WAWP_TOKEN || "1hSIrJn9px4Tgl";
 const WA_TARGET = process.env.WA_TARGET || "";
 
+const ALERT_THRESHOLDS = [80, 120];
+
 async function sendOSNotif(title, body, office) {
-  const filters = office
-    ? [{ field: "tag", key: "office", relation: "=", value: office }]
-    : null;
+  const filters = office ? [{ field: "tag", key: "office", relation: "=", value: office }] : null;
   const payload = {
     app_id: OS_APP_ID,
     headings: { ar: title, en: title },
     contents: { ar: body, en: body },
-    priority: 10,
-    ttl: 3600,
+    priority: 10, ttl: 3600,
     ...(filters ? { filters } : { included_segments: ["All"] }),
   };
   try {
     await fetch("https://onesignal.com/api/v1/notifications", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: "Basic " + OS_API_KEY,
-      },
+      headers: { "Content-Type": "application/json", Authorization: "Basic " + OS_API_KEY },
       body: JSON.stringify(payload),
     });
     console.log(`📢 OS sent: ${title} → ${office || "All"}`);
-  } catch (e) {
-    console.error("❌ OS error:", e.message);
-  }
+  } catch (e) { console.error("❌ OS error:", e.message); }
 }
 
 async function sendWA(phone, message) {
   if (!phone) return { ok: false, error: "no phone" };
-
-  const cleanPhone = String(phone)
-    .replace(/[\s\-\+]/g, "")
-    .replace(/^00/, "")
-    .replace(/@c\.us$/, "");
+  const cleanPhone = String(phone).replace(/[\s\-\+]/g, "").replace(/^00/, "").replace(/@c\.us$/, "");
   const chatId = cleanPhone + "@c.us";
-
   try {
     const res = await fetch("https://api.wawp.net/v2/send/text", {
       method: "POST",
@@ -82,16 +72,10 @@ async function sendWA(phone, message) {
         message: message,
       }),
     });
-
     const text = await res.text();
     let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = { raw: text.substring(0, 300) };
-    }
-
-    console.log(`📤 WA → ${chatId}: ${res.status}`, JSON.stringify(data).substring(0, 300));
+    try { data = JSON.parse(text); } catch { data = { raw: text.substring(0, 300) }; }
+    console.log(`📤 WA → ${chatId}: ${res.status}`);
     return { ok: res.ok, status: res.status, data };
   } catch (e) {
     console.error("❌ WA error:", e.message);
@@ -99,142 +83,133 @@ async function sendWA(phone, message) {
   }
 }
 
-async function tryAllMethods(phone, message) {
-  const cleanPhone = String(phone).replace(/[\s\-\+]/g, "").replace(/^00/, "").replace(/@c\.us$/, "");
-  const chatId = cleanPhone + "@c.us";
-  const results = {};
+function calcOutageMinutes(outageTime, createdAt) {
+  if (!outageTime) return 0;
+  const now = new Date();
+  const [h, m] = String(outageTime).split(":").map(Number);
+  if (isNaN(h) || isNaN(m)) return 0;
+  let baseDate = createdAt ? new Date(createdAt) : now;
+  if (isNaN(baseDate.getTime())) baseDate = now;
+  const outageDate = new Date(baseDate);
+  outageDate.setHours(h, m, 0, 0);
+  if (outageDate > now) outageDate.setDate(outageDate.getDate() - 1);
+  return Math.floor((now - outageDate) / 60000);
+}
 
-  try {
-    const r = await fetch("https://api.wawp.net/v2/send/text", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${WAWP_TOKEN}` },
-      body: JSON.stringify({ instance_id: WAWP_INSTANCE, access_token: WAWP_TOKEN, chatId, message }),
-    });
-    results.A_v2_bearer_body = { status: r.status, body: (await r.text()).substring(0, 200) };
-  } catch (e) { results.A_v2_bearer_body = { error: e.message }; }
-
-  try {
-    const r = await fetch("https://api.wawp.net/v2/send/text", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ instance_id: WAWP_INSTANCE, access_token: WAWP_TOKEN, chatId, message }),
-    });
-    results.B_v2_body_only = { status: r.status, body: (await r.text()).substring(0, 200) };
-  } catch (e) { results.B_v2_body_only = { error: e.message }; }
-
-  try {
-    const params = new URLSearchParams({ instance_id: WAWP_INSTANCE, access_token: WAWP_TOKEN });
-    const r = await fetch(`https://api.wawp.net/v2/send/text?${params}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chatId, message }),
-    });
-    results.C_v2_query_only = { status: r.status, body: (await r.text()).substring(0, 200) };
-  } catch (e) { results.C_v2_query_only = { error: e.message }; }
-
-  try {
-    const r = await fetch("https://app.wawp.net/api/send", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ number: cleanPhone, type: "text", message, instance_id: WAWP_INSTANCE, access_token: WAWP_TOKEN }),
-    });
-    results.D_legacy_app = { status: r.status, body: (await r.text()).substring(0, 200) };
-  } catch (e) { results.D_legacy_app = { error: e.message }; }
-
-  try {
-    const params = new URLSearchParams({ instance_id: WAWP_INSTANCE, access_token: WAWP_TOKEN, chatId: cleanPhone, message });
-    const r = await fetch(`https://wawp.net/wp-json/awp/v1/send?${params}`, { method: "POST" });
-    results.E_wp_json = { status: r.status, body: (await r.text()).substring(0, 200) };
-  } catch (e) { results.E_wp_json = { error: e.message }; }
-
-  return results;
+function extractReport(id, raw, source) {
+  const data = raw.data || raw;
+  return {
+    id: id,
+    source: source,
+    outageTime: data.outageTime || raw.outageTime,
+    office: data.office || raw.office,
+    stationName: data.stationName || raw.stationName,
+    feederName: data.feederName || raw.feederName || data.feederId || raw.feederId,
+    affectedAreas: data.affectedAreas || raw.affectedAreas || data.areas || raw.areas,
+    remainingCount: data.remainingCount || raw.remainingCount || data.totalAffected || raw.totalAffected || 0,
+    allRestored: raw.allRestored === true || data.allRestored === true,
+    status: raw.status || data.status,
+    createdAt: raw.createdAt || data.createdAt,
+  };
 }
 
 async function checkAlerts() {
   console.log("🔍 Checking outage alerts...", new Date().toISOString());
-  if (!db) {
-    console.log("⚠️ DB not connected, skip check");
-    return;
-  }
+  if (!db) return { ok: false, error: "no db" };
   try {
-    const [reportsSnap, alertedSnap] = await Promise.all([
+    const [oldReportsSnap, newReportsSnap, alertedSnap] = await Promise.all([
       db.ref("reports").once("value"),
+      db.ref("reports2/outages").once("value"),
       db.ref("alerted").once("value"),
     ]);
-
-    const reports = reportsSnap.val();
-    if (!reports) {
-      console.log("No reports");
-      return;
-    }
-
+    const oldReports = oldReportsSnap.val() || {};
+    const newReports = newReportsSnap.val() || {};
     const alerted = alertedSnap.val() || {};
     const newAlerted = { ...alerted };
-    const now = new Date();
 
-    for (const rep of Object.values(reports)) {
-      if (rep.allRestored) continue;
-      const outageTime = rep.data?.outageTime;
-      if (!outageTime) continue;
-
-      const [h, m] = outageTime.split(":").map(Number);
-      const outageDate = new Date(now);
-      outageDate.setHours(h, m, 0, 0);
-      if (outageDate > now) outageDate.setDate(outageDate.getDate() - 1);
-      const mins = Math.floor((now - outageDate) / 60000);
-
-      const id = rep.id || rep.data?.feeder || Math.random();
-      const office = rep.data?.office || "";
-      const feeder = rep.data?.feeder || "";
-      const key80 = id + "_80";
-      const key120 = id + "_120";
-
-      if (mins >= 120 && !alerted[key120]) {
-        const title = "🚨 تجاوز 120 دقيقة";
-        const body = `${feeder}  ${office}\nالانقطاع: ${outageTime}`;
-        await sendOSNotif(title, body, office);
-        if (WA_TARGET) {
-          const waMsg = "🚨 *تنبيه تأخر انقطاع*\n\n" +
-            `📍 المكتب: ${office}\n` + `🔌 المغذي: ${feeder}\n` +
-            `🕐 وقت الانقطاع: ${outageTime}\n` +
-            `⏱️ المدة: ${Math.floor(mins / 60)} ساعة ${mins % 60} دقيقة\n\n` +
-            "⚠️ البلاغ تجاوز ساعتين ولم يُكتمل بعد";
-          await sendWA(WA_TARGET, waMsg);
-        }
-        newAlerted[key120] = Date.now();
-      }
-      else if (mins >= 80 && !alerted[key80]) {
-        const title = "⚠️ تجاوز 80 دقيقة";
-        const body = `${feeder}  ${office}\nالانقطاع: ${outageTime}`;
-        await sendOSNotif(title, body, office);
-        if (WA_TARGET) {
-          const waMsg = "⚠️ *تنبيه تأخر انقطاع*\n\n" +
-            `📍 المكتب: ${office}\n` + `🔌 المغذي: ${feeder}\n` +
-            `🕐 وقت الانقطاع: ${outageTime}\n` +
-            `⏱️ المدة: ${mins} دقيقة\n\n` +
-            "⚠️ البلاغ تجاوز 80 دقيقة";
-          await sendWA(WA_TARGET, waMsg);
-        }
-        newAlerted[key80] = Date.now();
-      }
+    const allReports = [];
+    for (const [id, raw] of Object.entries(oldReports)) {
+      allReports.push(extractReport(id, raw, "reports"));
+    }
+    for (const [id, raw] of Object.entries(newReports)) {
+      allReports.push(extractReport(id, raw, "reports2/outages"));
     }
 
-    const cutoff = Date.now() - 6 * 3600000;
+    let checked = 0, alertsSent = 0, activeFound = 0;
+
+    for (const r of allReports) {
+      checked++;
+      if (r.allRestored || r.status === "closed") continue;
+      if (!r.outageTime) continue;
+      activeFound++;
+      const mins = calcOutageMinutes(r.outageTime, r.createdAt);
+
+      let triggered = null;
+      for (const t of [...ALERT_THRESHOLDS].sort((a, b) => b - a)) {
+        const key = `${r.id}_${t}`;
+        if (mins >= t && !alerted[key]) {
+          triggered = { threshold: t, key };
+          break;
+        }
+      }
+      if (!triggered) continue;
+
+      const { threshold, key } = triggered;
+      const hours = Math.floor(mins / 60);
+      const remainingMins = mins % 60;
+      const durationText = hours > 0 ? `${hours} ساعة ${remainingMins} دقيقة` : `${mins} دقيقة`;
+      const emoji = threshold >= 120 ? "🚨" : "⚠️";
+      const title = `${emoji} تجاوز ${threshold} دقيقة`;
+
+      console.log(`${emoji} ALERT: id=${r.id} office=${r.office} mins=${mins} threshold=${threshold} [${r.source}]`);
+
+      const pushBody = `${r.feederName || "-"} — ${r.office || "-"}\nالانقطاع: ${r.outageTime} (${durationText})`;
+      await sendOSNotif(title, pushBody, r.office);
+
+      if (WA_TARGET) {
+        const waMsg = `${emoji} *تنبيه تأخر انقطاع*\n\n` +
+          `📍 المكتب: ${r.office || "—"}\n` +
+          `🏢 المحطة: ${r.stationName || "—"}\n` +
+          `🔌 المغذي: ${r.feederName || "—"}\n` +
+          `🗺 المناطق: ${r.affectedAreas || "—"}\n` +
+          `🕐 وقت الانقطاع: ${r.outageTime}\n` +
+          `⏱️ المدة: ${durationText}\n` +
+          `👥 المتبقي: ${r.remainingCount} مشترك\n\n` +
+          `⚠️ البلاغ تجاوز ${threshold} دقيقة ولم يُكتمل بعد`;
+        await sendWA(WA_TARGET, waMsg);
+      }
+      newAlerted[key] = Date.now();
+      alertsSent++;
+    }
+
+    const cutoff = Date.now() - 24 * 3600000;
     Object.keys(newAlerted).forEach((k) => {
       if (newAlerted[k] < cutoff) delete newAlerted[k];
     });
     await db.ref("alerted").set(newAlerted);
+
+    console.log(`✅ Total=${checked} Active=${activeFound} Alerts=${alertsSent}`);
+    return {
+      ok: true, total: checked, active: activeFound, alertsSent,
+      sources: {
+        reports: Object.keys(oldReports).length,
+        reports2_outages: Object.keys(newReports).length,
+      },
+    };
   } catch (e) {
-    console.error("Error in checkAlerts:", e.message);
+    console.error("❌ Error in checkAlerts:", e.message);
+    return { ok: false, error: e.message };
   }
 }
 
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "2.4",
+    version: "2.6",
     time: new Date().toISOString(),
-    endpoints: ["GET /", "GET /config", "GET /check", "GET /test-wa", "GET /diag-wa", "POST /send-wa"],
+    schema: "reads from both reports/ and reports2/outages",
+    thresholds: ALERT_THRESHOLDS,
+    endpoints: ["GET /", "GET /config", "GET /check", "GET /reports", "GET /test-wa", "POST /send-wa"],
   });
 });
 
@@ -245,12 +220,46 @@ app.get("/config", (req, res) => {
     WA_TARGET: WA_TARGET || "❌ missing",
     FIREBASE: db ? "✅ connected" : "❌ not connected",
     ONESIGNAL: OS_APP_ID ? "✅ configured" : "❌ missing",
+    paths: ["reports/", "reports2/outages/"],
+    alert_thresholds: ALERT_THRESHOLDS,
   });
 });
 
 app.get("/check", async (req, res) => {
-  await checkAlerts();
-  res.json({ status: "done", time: new Date().toISOString() });
+  const result = await checkAlerts();
+  res.json({ ...result, time: new Date().toISOString() });
+});
+
+app.get("/reports", async (req, res) => {
+  if (!db) return res.status(500).json({ ok: false, error: "no db" });
+  try {
+    const [oldSnap, newSnap] = await Promise.all([
+      db.ref("reports").once("value"),
+      db.ref("reports2/outages").once("value"),
+    ]);
+    const oldReports = oldSnap.val() || {};
+    const newReports = newSnap.val() || {};
+    const list = [];
+    for (const [id, raw] of Object.entries(oldReports)) {
+      const r = extractReport(id, raw, "reports");
+      list.push({ ...r, durationMinutes: calcOutageMinutes(r.outageTime, r.createdAt) });
+    }
+    for (const [id, raw] of Object.entries(newReports)) {
+      const r = extractReport(id, raw, "reports2/outages");
+      list.push({ ...r, durationMinutes: calcOutageMinutes(r.outageTime, r.createdAt) });
+    }
+    const active = list.filter(r => !r.allRestored && r.status !== "closed");
+    res.json({
+      ok: true, total: list.length, active: active.length,
+      sources: {
+        reports: Object.keys(oldReports).length,
+        "reports2/outages": Object.keys(newReports).length,
+      },
+      activeList: active, allList: list,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
 });
 
 app.get("/test-wa", async (req, res) => {
@@ -264,12 +273,6 @@ app.get("/test-wa", async (req, res) => {
   res.json({ ok: result.ok, target: WA_TARGET, result });
 });
 
-app.get("/diag-wa", async (req, res) => {
-  if (!WA_TARGET) return res.status(400).json({ ok: false, error: "WA_TARGET not set" });
-  const results = await tryAllMethods(WA_TARGET, "🧪 طاقة diag test");
-  res.json({ target: WA_TARGET, instance: WAWP_INSTANCE, methods: results });
-});
-
 app.post("/send-wa", async (req, res) => {
   const { phone, message } = req.body || {};
   if (!phone || !message) return res.status(400).json({ ok: false, error: "phone and message required" });
@@ -281,7 +284,7 @@ app.use((req, res) => {
   res.status(404).json({
     ok: false,
     error: `route not found: ${req.method} ${req.path}`,
-    available: ["/", "/config", "/check", "/test-wa", "/diag-wa", "/send-wa"],
+    available: ["/", "/config", "/check", "/reports", "/test-wa", "/send-wa"],
   });
 });
 
@@ -289,7 +292,8 @@ setInterval(checkAlerts, 5 * 60 * 1000);
 setTimeout(checkAlerts, 5000);
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🚀 Server v2.6 running on port ${PORT}`);
+  console.log(`📂 Reads from: reports/ + reports2/outages/`);
   console.log(`📱 Wawp Instance: ${WAWP_INSTANCE}`);
   console.log(`📞 WA_TARGET: ${WA_TARGET || "(not set)"}`);
 });
