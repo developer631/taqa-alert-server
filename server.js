@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// طاقة - Alert Server  v2.1
+// طاقة - Alert Server  v2.2
 // OneSignal Push + Wawp WhatsApp + Firebase Realtime DB
 // ═══════════════════════════════════════════════════════════
 
@@ -12,7 +12,6 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// ─── Firebase Admin init ───────────────────────────────────
 let db = null;
 try {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -26,11 +25,9 @@ try {
   console.error("❌ Firebase init failed:", e.message);
 }
 
-// ─── OneSignal ─────────────────────────────────────────────
 const OS_APP_ID = "bd870563-8761-403d-a593-6fd5f8afad6d";
 const OS_API_KEY = "os_v2_app_xwdqky4hmfad3jmtn7k7rl5nnvtdupv7osherneztog4fz76chlb25pzmq5lrjriiiiey6dvvgj2bs4yuyqdrijeh6ob2o5web7hzna";
 
-// ─── Wawp WhatsApp API ─────────────────────────────────────
 const WAWP_INSTANCE = process.env.WAWP_INSTANCE_ID || "0666F2942346";
 const WAWP_TOKEN = process.env.WAWP_TOKEN || "1hSIrJn9px4Tgl";
 const WA_TARGET = process.env.WA_TARGET || "";
@@ -71,22 +68,24 @@ async function sendWA(phone, message) {
     .replace(/@c\.us$/, "");
 
   try {
-    const params = new URLSearchParams({
-      instance_id: WAWP_INSTANCE,
-      access_token: WAWP_TOKEN,
-      chatId: cleanPhone,
-      message: message,
+    const res = await fetch("https://app.wawp.net/api/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        number: cleanPhone,
+        type: "text",
+        message: message,
+        instance_id: WAWP_INSTANCE,
+        access_token: WAWP_TOKEN,
+      }),
     });
 
-    const url = `https://wawp.net/wp-json/awp/v1/send?${params.toString()}`;
-    const res = await fetch(url, { method: "POST" });
     const text = await res.text();
-
     let data;
     try {
       data = JSON.parse(text);
     } catch {
-      data = { raw: text.substring(0, 200) };
+      data = { raw: text.substring(0, 300) };
     }
 
     console.log(`📤 WA → ${cleanPhone}: ${res.status}`, JSON.stringify(data).substring(0, 300));
@@ -189,7 +188,7 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "2.1",
+    version: "2.2",
     time: new Date().toISOString(),
     endpoints: [
       "GET  /         - health check",
