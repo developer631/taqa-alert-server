@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════
-// طاقة - Alert Server  v2.9
-// + معلومات المفتاح الذكي في رسائل التنبيه
+// طاقة - Alert Server  v3.0
+// + المفتاح الذكي: الحالة من آخر مرحلة إعادة
 // ═══════════════════════════════════════════════════════════
 
 const express = require("express");
@@ -35,12 +35,13 @@ const WA_TARGET = process.env.WA_TARGET || "";
 const ALERT_THRESHOLDS = [80, 120];
 const RIYADH_OFFSET_MS = 3 * 3600 * 1000;
 
-// خريطة حالات المفتاح الذكي
-const SK_STATUS_MAP = {
-  ok: "✅ يعمل",
+// نتائج المفتاح الذكي في كل مرحلة
+const SK_RESULT_MAP = {
+  ok: "✅ نجح",
   not_responding: "🔴 لا يستجيب",
   offline: "🟠 أوف لاين",
-  not_in_zenon: "🟡 غير مضاف بنظام الزنون",
+  not_in_zenon: "🟡 غير مضاف بالزنون",
+  failed_other: "⚠️ فشل لسبب آخر",
 };
 
 async function sendOSNotif(title, body, office) {
@@ -127,6 +128,17 @@ function calcOutageMinutes(outageTime, createdAt) {
   return Math.max(0, Math.floor(finalDiff / 60000));
 }
 
+// v3.0: أحدث محاولة مفتاح ذكي في المراحل
+function getLatestSmartKeyAttempt(stages) {
+  if (!Array.isArray(stages)) return null;
+  for (let i = stages.length - 1; i >= 0; i--) {
+    if (stages[i].by === "مفتاح ذكي" && stages[i].smartKeyResult) {
+      return stages[i].smartKeyResult;
+    }
+  }
+  return null;
+}
+
 function extractReport(id, raw, source) {
   const data = raw.data || raw;
   let buses = [];
@@ -135,6 +147,8 @@ function extractReport(id, raw, source) {
   else if (busNumbersField) buses = [String(busNumbersField)];
   const busNumber = data.busNumber || raw.busNumber;
   if (busNumber && !buses.includes(String(busNumber))) buses.push(String(busNumber));
+
+  const stages = data.stages || raw.stages || [];
 
   return {
     id: id, source: source,
@@ -145,9 +159,9 @@ function extractReport(id, raw, source) {
     stationId: data.stationId || raw.stationId,
     feederName: data.feederName || raw.feederName,
     feederId: data.feederId || raw.feederId,
-    // v2.9: المفتاح الذكي
+    // v3.0: المفتاح الذكي
     smartKey: data.smartKey || raw.smartKey,
-    smartKeyStatus: data.smartKeyStatus || raw.smartKeyStatus,
+    latestSmartKeyResult: getLatestSmartKeyAttempt(stages),
     busNumber: busNumber,
     busNumbers: buses,
     affectedAreas: data.affectedAreas || raw.affectedAreas || data.areas || raw.areas,
@@ -158,6 +172,7 @@ function extractReport(id, raw, source) {
     allRestored: raw.allRestored === true || data.allRestored === true,
     status: raw.status || data.status,
     createdAt: raw.createdAt || data.createdAt,
+    stages: stages,
   };
 }
 
@@ -187,12 +202,13 @@ function formatOutageDetails(r) {
     if (r.busNumber) lines.push(`⚡ الباص: B${r.busNumber}`);
   }
 
-  // v2.9: المفتاح الذكي (لبلاغات المغذي فقط)
-  if (type === "feeder" && (r.smartKey || r.smartKeyStatus)) {
-    const skLabel = r.smartKey ? `SK#${r.smartKey}` : "";
-    const skStatus = SK_STATUS_MAP[r.smartKeyStatus] || "";
-    const skParts = [skLabel, skStatus].filter(Boolean).join(" — ");
-    if (skParts) lines.push(`🔑 المفتاح الذكي: ${skParts}`);
+  // v3.0: المفتاح الذكي (للمغذي)
+  if (type === "feeder" && r.smartKey) {
+    let skLine = `🔑 المفتاح الذكي: SK#${r.smartKey}`;
+    if (r.latestSmartKeyResult) {
+      skLine += ` — ${SK_RESULT_MAP[r.latestSmartKeyResult] || r.latestSmartKeyResult}`;
+    }
+    lines.push(skLine);
   }
 
   return lines.join("\n");
@@ -242,14 +258,14 @@ async function checkAlerts() {
       const title = `${emoji} تجاوز ${threshold} دقيقة`;
       const outageDetails = formatOutageDetails(r);
 
-      // تحذير المفتاح الذكي
+      // v3.0: تحذير لو آخر محاولة مفتاح ذكي فشلت
       let smartKeyWarning = "";
-      if (r.outageType === "feeder" &&
-          (r.smartKeyStatus === "not_responding" || r.smartKeyStatus === "offline")) {
-        smartKeyWarning = `\n🔧 *تنبيه: يستلزم تدخل ميداني* (المفتاح الذكي غير متجاوب)\n`;
+      if (r.outageType === "feeder" && r.latestSmartKeyResult &&
+          ["not_responding", "offline", "failed_other"].includes(r.latestSmartKeyResult)) {
+        smartKeyWarning = `\n🔧 *تنبيه: محاولة المفتاح الذكي فشلت — يستلزم تدخل ميداني*\n`;
       }
 
-      console.log(`${emoji} ALERT: id=${r.id} office=${r.office} type=${r.outageType} mins=${mins} threshold=${threshold} sk=${r.smartKeyStatus || "-"} [${r.source}]`);
+      console.log(`${emoji} ALERT: id=${r.id} office=${r.office} type=${r.outageType} mins=${mins} threshold=${threshold} skResult=${r.latestSmartKeyResult || "-"} [${r.source}]`);
 
       const pushBody = `${r.office || "-"}\nالانقطاع: ${r.outageTime} (${durationText})`;
       await sendOSNotif(title, pushBody, r.office);
@@ -295,11 +311,11 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "2.9",
+    version: "3.0",
     time: new Date().toISOString(),
     features: [
-      "✅ Smart key info in alerts",
-      "✅ Field-team warning when SK not responding",
+      "✅ Smart key result from latest stage",
+      "✅ Field-team warning when SK attempt failed",
       "✅ Asia/Riyadh timezone",
     ],
     endpoints: ["GET /", "GET /config", "GET /check", "GET /reports", "GET /test-wa", "POST /send-wa"],
@@ -385,8 +401,8 @@ setInterval(checkAlerts, 5 * 60 * 1000);
 setTimeout(checkAlerts, 5000);
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server v2.9 running on port ${PORT}`);
+  console.log(`🚀 Server v3.0 running on port ${PORT}`);
   console.log(`🌍 Timezone: Asia/Riyadh (UTC+3)`);
-  console.log(`🔑 Smart key feature enabled`);
+  console.log(`🔑 Smart key: status from latest stage attempt`);
   console.log(`📞 WA_TARGET: ${WA_TARGET || "(not set)"}`);
 });
