@@ -1,7 +1,6 @@
 // ═══════════════════════════════════════════════════════════
-// طاقة - Alert Server  v2.6
-// يقرأ من المسارين: reports/ (قديم) + reports2/outages (جديد)
-// OneSignal Push + Wawp v2 WhatsApp + Firebase Realtime DB
+// طاقة - Alert Server  v2.8
+// عرض ذكي للبلاغات (محطة/باص/مغذي) + تحسين الرسالة
 // ═══════════════════════════════════════════════════════════
 
 const express = require("express");
@@ -34,6 +33,7 @@ const WAWP_TOKEN = process.env.WAWP_TOKEN || "1hSIrJn9px4Tgl";
 const WA_TARGET = process.env.WA_TARGET || "";
 
 const ALERT_THRESHOLDS = [80, 120];
+const RIYADH_OFFSET_MS = 3 * 3600 * 1000;
 
 async function sendOSNotif(title, body, office) {
   const filters = office ? [{ field: "tag", key: "office", relation: "=", value: office }] : null;
@@ -85,32 +85,97 @@ async function sendWA(phone, message) {
 
 function calcOutageMinutes(outageTime, createdAt) {
   if (!outageTime) return 0;
-  const now = new Date();
-  const [h, m] = String(outageTime).split(":").map(Number);
+  const nowRiyadh = new Date(Date.now() + RIYADH_OFFSET_MS);
+  const parts = String(outageTime).split(":").map(Number);
+  const h = parts[0];
+  const m = parts[1] || 0;
   if (isNaN(h) || isNaN(m)) return 0;
-  let baseDate = createdAt ? new Date(createdAt) : now;
-  if (isNaN(baseDate.getTime())) baseDate = now;
+
+  let baseDate = nowRiyadh;
+  if (createdAt) {
+    if (typeof createdAt === "number") {
+      baseDate = new Date(createdAt + RIYADH_OFFSET_MS);
+    } else if (typeof createdAt === "string") {
+      const ddmmyyyy = createdAt.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+      if (ddmmyyyy) {
+        const [, dd, mm, yyyy] = ddmmyyyy;
+        baseDate = new Date(Date.UTC(+yyyy, +mm - 1, +dd) + RIYADH_OFFSET_MS);
+      } else {
+        const parsed = new Date(createdAt);
+        if (!isNaN(parsed.getTime())) {
+          baseDate = new Date(parsed.getTime() + RIYADH_OFFSET_MS);
+        }
+      }
+    }
+  }
+
   const outageDate = new Date(baseDate);
-  outageDate.setHours(h, m, 0, 0);
-  if (outageDate > now) outageDate.setDate(outageDate.getDate() - 1);
-  return Math.floor((now - outageDate) / 60000);
+  outageDate.setUTCHours(h, m, 0, 0);
+  const diffMs = nowRiyadh.getTime() - outageDate.getTime();
+  if (diffMs < -60 * 60 * 1000) {
+    outageDate.setUTCDate(outageDate.getUTCDate() - 1);
+  }
+  const finalDiff = nowRiyadh.getTime() - outageDate.getTime();
+  return Math.max(0, Math.floor(finalDiff / 60000));
 }
 
 function extractReport(id, raw, source) {
   const data = raw.data || raw;
+  let buses = [];
+  const busNumbersField = data.busNumbers || raw.busNumbers;
+  if (Array.isArray(busNumbersField)) buses = busNumbersField;
+  else if (busNumbersField) buses = [String(busNumbersField)];
+  const busNumber = data.busNumber || raw.busNumber;
+  if (busNumber && !buses.includes(String(busNumber))) buses.push(String(busNumber));
+
   return {
-    id: id,
-    source: source,
+    id: id, source: source,
+    outageType: data.outageType || raw.outageType,
     outageTime: data.outageTime || raw.outageTime,
     office: data.office || raw.office,
     stationName: data.stationName || raw.stationName,
-    feederName: data.feederName || raw.feederName || data.feederId || raw.feederId,
+    stationId: data.stationId || raw.stationId,
+    feederName: data.feederName || raw.feederName,
+    feederId: data.feederId || raw.feederId,
+    busNumber: busNumber,
+    busNumbers: buses,
     affectedAreas: data.affectedAreas || raw.affectedAreas || data.areas || raw.areas,
-    remainingCount: data.remainingCount || raw.remainingCount || data.totalAffected || raw.totalAffected || 0,
+    totalAffected: data.totalAffected || raw.totalAffected,
+    remainingCount: data.remainingCount !== undefined ? data.remainingCount : raw.remainingCount,
+    sensitive: data.sensitive || raw.sensitive || 0,
+    reason: data.reason || raw.reason,
     allRestored: raw.allRestored === true || data.allRestored === true,
     status: raw.status || data.status,
     createdAt: raw.createdAt || data.createdAt,
   };
+}
+
+function formatOutageDetails(r) {
+  const lines = [];
+  const type = r.outageType;
+  if (r.stationName) lines.push(`🏢 المحطة: ${r.stationName}`);
+
+  if (type === "feeder" && r.feederName) {
+    lines.push(`🔌 المغذي: ${r.feederName}`);
+    if (r.busNumber) lines.push(`⚡ الباص: B${r.busNumber}`);
+  } else if (type === "bus") {
+    if (r.busNumbers && r.busNumbers.length > 0) {
+      const list = r.busNumbers.includes("all")
+        ? "كل الباصات"
+        : r.busNumbers.map((b) => `B${b}`).join("، ");
+      lines.push(`⚡ الباص/الباصات المتأثرة: ${list}`);
+    } else if (r.busNumber) {
+      lines.push(`⚡ الباص: B${r.busNumber}`);
+    } else {
+      lines.push(`⚡ نوع البلاغ: انقطاع باص`);
+    }
+  } else if (type === "station") {
+    lines.push(`⚠️ انقطاع محطة كامل`);
+  } else {
+    if (r.feederName) lines.push(`🔌 المغذي: ${r.feederName}`);
+    if (r.busNumber) lines.push(`⚡ الباص: B${r.busNumber}`);
+  }
+  return lines.join("\n");
 }
 
 async function checkAlerts() {
@@ -128,15 +193,10 @@ async function checkAlerts() {
     const newAlerted = { ...alerted };
 
     const allReports = [];
-    for (const [id, raw] of Object.entries(oldReports)) {
-      allReports.push(extractReport(id, raw, "reports"));
-    }
-    for (const [id, raw] of Object.entries(newReports)) {
-      allReports.push(extractReport(id, raw, "reports2/outages"));
-    }
+    for (const [id, raw] of Object.entries(oldReports)) allReports.push(extractReport(id, raw, "reports"));
+    for (const [id, raw] of Object.entries(newReports)) allReports.push(extractReport(id, raw, "reports2/outages"));
 
     let checked = 0, alertsSent = 0, activeFound = 0;
-
     for (const r of allReports) {
       checked++;
       if (r.allRestored || r.status === "closed") continue;
@@ -160,22 +220,24 @@ async function checkAlerts() {
       const durationText = hours > 0 ? `${hours} ساعة ${remainingMins} دقيقة` : `${mins} دقيقة`;
       const emoji = threshold >= 120 ? "🚨" : "⚠️";
       const title = `${emoji} تجاوز ${threshold} دقيقة`;
+      const outageDetails = formatOutageDetails(r);
 
-      console.log(`${emoji} ALERT: id=${r.id} office=${r.office} mins=${mins} threshold=${threshold} [${r.source}]`);
+      console.log(`${emoji} ALERT: id=${r.id} office=${r.office} type=${r.outageType} mins=${mins} threshold=${threshold} [${r.source}]`);
 
-      const pushBody = `${r.feederName || "-"} — ${r.office || "-"}\nالانقطاع: ${r.outageTime} (${durationText})`;
+      const pushBody = `${r.office || "-"}\nالانقطاع: ${r.outageTime} (${durationText})`;
       await sendOSNotif(title, pushBody, r.office);
 
       if (WA_TARGET) {
         const waMsg = `${emoji} *تنبيه تأخر انقطاع*\n\n` +
           `📍 المكتب: ${r.office || "—"}\n` +
-          `🏢 المحطة: ${r.stationName || "—"}\n` +
-          `🔌 المغذي: ${r.feederName || "—"}\n` +
+          `${outageDetails}\n` +
           `🗺 المناطق: ${r.affectedAreas || "—"}\n` +
           `🕐 وقت الانقطاع: ${r.outageTime}\n` +
           `⏱️ المدة: ${durationText}\n` +
-          `👥 المتبقي: ${r.remainingCount} مشترك\n\n` +
-          `⚠️ البلاغ تجاوز ${threshold} دقيقة ولم يُكتمل بعد`;
+          `👥 المتأثرين: ${r.totalAffected || "-"} | المتبقي: ${r.remainingCount !== undefined ? r.remainingCount : "—"}\n` +
+          (r.sensitive ? `🔴 مشتركون حساسون: ${r.sensitive}\n` : "") +
+          (r.reason ? `📋 السبب: ${r.reason}\n` : "") +
+          `\n⚠️ البلاغ تجاوز ${threshold} دقيقة ولم يُكتمل بعد`;
         await sendWA(WA_TARGET, waMsg);
       }
       newAlerted[key] = Date.now();
@@ -205,9 +267,9 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "2.6",
+    version: "2.8",
     time: new Date().toISOString(),
-    schema: "reads from both reports/ and reports2/outages",
+    timeRiyadh: new Date(Date.now() + RIYADH_OFFSET_MS).toISOString().replace("Z", "+03:00"),
     thresholds: ALERT_THRESHOLDS,
     endpoints: ["GET /", "GET /config", "GET /check", "GET /reports", "GET /test-wa", "POST /send-wa"],
   });
@@ -215,13 +277,13 @@ app.get("/", (req, res) => {
 
 app.get("/config", (req, res) => {
   res.json({
-    WAWP_INSTANCE_ID: WAWP_INSTANCE ? "✅ set (" + WAWP_INSTANCE + ")" : "❌ missing",
-    WAWP_TOKEN: WAWP_TOKEN ? "✅ set (hidden)" : "❌ missing",
+    WAWP_INSTANCE_ID: WAWP_INSTANCE ? "✅ set" : "❌ missing",
+    WAWP_TOKEN: WAWP_TOKEN ? "✅ set" : "❌ missing",
     WA_TARGET: WA_TARGET || "❌ missing",
     FIREBASE: db ? "✅ connected" : "❌ not connected",
-    ONESIGNAL: OS_APP_ID ? "✅ configured" : "❌ missing",
     paths: ["reports/", "reports2/outages/"],
     alert_thresholds: ALERT_THRESHOLDS,
+    timezone: "Asia/Riyadh (UTC+3)",
   });
 });
 
@@ -292,8 +354,8 @@ setInterval(checkAlerts, 5 * 60 * 1000);
 setTimeout(checkAlerts, 5000);
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server v2.6 running on port ${PORT}`);
+  console.log(`🚀 Server v2.8 running on port ${PORT}`);
+  console.log(`🌍 Timezone: Asia/Riyadh (UTC+3)`);
   console.log(`📂 Reads from: reports/ + reports2/outages/`);
-  console.log(`📱 Wawp Instance: ${WAWP_INSTANCE}`);
   console.log(`📞 WA_TARGET: ${WA_TARGET || "(not set)"}`);
 });
