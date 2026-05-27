@@ -1,7 +1,7 @@
 {
   "name": "taqa-alert-server",
-  "version": "1.0.0",
-  "description": "خادم تنبيهات طاقة",
+  "version": "2.0.0",
+  "description": "خادم تنبيهات طاقة - OneSignal + Wawp WhatsApp + Firebase",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
