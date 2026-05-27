@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// طاقة - Alert Server  v2.0
+// طاقة - Alert Server  v2.1
 // OneSignal Push + Wawp WhatsApp + Firebase Realtime DB
 // ═══════════════════════════════════════════════════════════
 
@@ -35,10 +35,6 @@ const WAWP_INSTANCE = process.env.WAWP_INSTANCE_ID || "0666F2942346";
 const WAWP_TOKEN = process.env.WAWP_TOKEN || "1hSIrJn9px4Tgl";
 const WA_TARGET = process.env.WA_TARGET || "";
 
-// ═══════════════════════════════════════════════════════════
-// HELPERS
-// ═══════════════════════════════════════════════════════════
-
 async function sendOSNotif(title, body, office) {
   const filters = office
     ? [{ field: "tag", key: "office", relation: "=", value: office }]
@@ -71,23 +67,29 @@ async function sendWA(phone, message) {
 
   const cleanPhone = String(phone)
     .replace(/[\s\-\+]/g, "")
-    .replace(/^00/, "");
+    .replace(/^00/, "")
+    .replace(/@c\.us$/, "");
 
   try {
-    const url = `https://api.wawp.net/api/v1/${WAWP_INSTANCE}/send-message`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${WAWP_TOKEN}`,
-      },
-      body: JSON.stringify({
-        chatId: cleanPhone.includes("@") ? cleanPhone : cleanPhone + "@c.us",
-        message: message,
-      }),
+    const params = new URLSearchParams({
+      instance_id: WAWP_INSTANCE,
+      access_token: WAWP_TOKEN,
+      chatId: cleanPhone,
+      message: message,
     });
-    const data = await res.json();
-    console.log(`📤 WA → ${cleanPhone}:`, JSON.stringify(data));
+
+    const url = `https://wawp.net/wp-json/awp/v1/send?${params.toString()}`;
+    const res = await fetch(url, { method: "POST" });
+    const text = await res.text();
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { raw: text.substring(0, 200) };
+    }
+
+    console.log(`📤 WA → ${cleanPhone}: ${res.status}`, JSON.stringify(data).substring(0, 300));
     return { ok: res.ok, status: res.status, data };
   } catch (e) {
     console.error("❌ WA error:", e.message);
@@ -95,9 +97,6 @@ async function sendWA(phone, message) {
   }
 }
 
-// ═══════════════════════════════════════════════════════════
-// فحص الانقطاعات (يعمل تلقائياً كل 5 دقايق)
-// ═══════════════════════════════════════════════════════════
 async function checkAlerts() {
   console.log("🔍 Checking outage alerts...", new Date().toISOString());
   if (!db) {
@@ -187,14 +186,10 @@ async function checkAlerts() {
   }
 }
 
-// ═══════════════════════════════════════════════════════════
-// ROUTES
-// ═══════════════════════════════════════════════════════════
-
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "2.0",
+    version: "2.1",
     time: new Date().toISOString(),
     endpoints: [
       "GET  /         - health check",
@@ -267,9 +262,6 @@ app.use((req, res) => {
   });
 });
 
-// ═══════════════════════════════════════════════════════════
-// SCHEDULED CHECKS — كل 5 دقايق
-// ═══════════════════════════════════════════════════════════
 setInterval(checkAlerts, 5 * 60 * 1000);
 setTimeout(checkAlerts, 5000);
 
