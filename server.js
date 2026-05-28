@@ -451,7 +451,7 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "3.6-fix",
+    version: "3.6-pairdiag",
     time: new Date().toISOString(),
     features: [
       "✅ Per-recipient custom alert thresholds (dynamic)",
@@ -581,6 +581,39 @@ app.get("/wawp/diag", async (req, res) => {
     }
   }
   res.json({ ok: true, token_used: TOKEN.substring(0, 6) + "...", attempts });
+});
+
+// تشخيص Pairing Code لـ instance معيّن (GET للتجربة من المتصفح)
+// الاستخدام: /wawp/diag-pair?instanceId=XXXX&phone=9665XXXXXXXX
+app.get("/wawp/diag-pair", async (req, res) => {
+  const TOKEN = WAWP_TOKEN;
+  const instanceId = req.query.instanceId;
+  const phone = (req.query.phone || "").replace(/[\s\-\+]/g, "");
+  if (!instanceId || !phone) return res.status(400).json({ ok: false, error: "أضف ?instanceId=XXXX&phone=9665XXXXXXXX" });
+
+  const results = {};
+  const tries = [
+    { name: "auth/request-code POST", url: `https://api.wawp.net/v2/auth/request-code?instance_id=${instanceId}&access_token=${TOKEN}`, body: { access_token: TOKEN, instance_id: instanceId, phone: phone, phoneNumber: phone } },
+    { name: "auth/pairing-code POST", url: `https://api.wawp.net/v2/auth/pairing-code?instance_id=${instanceId}&access_token=${TOKEN}`, body: { access_token: TOKEN, instance_id: instanceId, phone: phone, phoneNumber: phone } },
+    { name: "auth/pair POST", url: `https://api.wawp.net/v2/auth/pair?instance_id=${instanceId}&access_token=${TOKEN}`, body: { access_token: TOKEN, instance_id: instanceId, phone: phone, phoneNumber: phone } },
+    { name: "auth/code POST", url: `https://api.wawp.net/v2/auth/code?instance_id=${instanceId}&access_token=${TOKEN}`, body: { access_token: TOKEN, instance_id: instanceId, phone: phone, phoneNumber: phone } },
+    { name: "session/pairing-code POST", url: `https://api.wawp.net/v2/session/pairing-code?instance_id=${instanceId}&access_token=${TOKEN}`, body: { access_token: TOKEN, instance_id: instanceId, phone: phone, phoneNumber: phone } },
+  ];
+  for (const t of tries) {
+    try {
+      const r = await fetch(t.url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + TOKEN },
+        body: JSON.stringify(t.body),
+      });
+      const txt = await r.text();
+      let d; try { d = JSON.parse(txt); } catch { d = { raw: txt.substring(0, 200) }; }
+      results[t.name] = { status: r.status, keys: Object.keys(d), data: d };
+    } catch (e) {
+      results[t.name] = { error: e.message };
+    }
+  }
+  res.json({ ok: true, instanceId, phone, results });
 });
 
 // تشخيص QR والحالة لـ instance معيّن (GET للتجربة من المتصفح)
