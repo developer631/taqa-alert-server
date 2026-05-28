@@ -61,9 +61,9 @@ function formatDuration(mins) {
 function normalizeOffice(office) {
   if (!office) return "";
   let s = String(office).trim();
-  // توافق: منيزلة/المنيزلة القديمة = شرق الأحساء
-  if (s === "منيزلة" || s === "المنيزلة" || s === "شرق الأحساء" || s === "شرق الاحساء") {
-    return "شرق الأحساء";
+  // توافق: منيزلة/المنيزلة/شرق الأحساء القديمة = مكتب القرى
+  if (s === "منيزلة" || s === "المنيزلة" || s === "شرق الأحساء" || s === "شرق الاحساء" || s === "مكتب القرى") {
+    return "مكتب القرى";
   }
   // شيل "ال" من البداية
   if (s.startsWith("ال")) s = s.substring(2);
@@ -474,7 +474,7 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "3.9-eastahsa",
+    version: "3.9-qura",
     time: new Date().toISOString(),
     features: [
       "✅ Per-recipient custom alert thresholds (dynamic)",
