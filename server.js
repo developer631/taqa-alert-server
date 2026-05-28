@@ -453,7 +453,7 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "3.8-otp",
+    version: "3.8-otp2",
     time: new Date().toISOString(),
     features: [
       "✅ Per-recipient custom alert thresholds (dynamic)",
@@ -724,7 +724,7 @@ app.post("/auth/reset-password", async (req, res) => {
     }
 
     // 2. ولّد كلمة مرور مؤقتة (8 أحرف/أرقام)
-    const tempPass = Math.random().toString(36).slice(-4).toUpperCase() + Math.floor(1000 + Math.random() * 9000);
+    const tempPass = String(Math.floor(100000 + Math.random() * 900000)); // 6 أرقام
 
     // 3. عيّنها للحساب
     await admin.auth().updateUser(userRecord.uid, { password: tempPass });
