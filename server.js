@@ -451,7 +451,7 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "3.6-qrdiag",
+    version: "3.6-fix",
     time: new Date().toISOString(),
     features: [
       "✅ Per-recipient custom alert thresholds (dynamic)",
@@ -636,10 +636,9 @@ app.post("/wawp/create-session", async (req, res) => {
 
     console.log(`✅ Session created: ${instanceId} (${createData.session_name})`);
 
-    // 2. انتظر شوي لين الـ engine يجهّز (5-15 ثانية حسب التوثيق)
-    await new Promise(r => setTimeout(r, 6000));
-
-    // 3. جلب QR
+    // رجّع فوراً مع instanceId - الـ frontend يسحب QR بالـ polling
+    // (نحاول جلب QR مرة وحدة بسرعة، لو ما جهز الـ frontend يعيد المحاولة)
+    await new Promise(r => setTimeout(r, 4000));
     const qr = await fetchQRv2(instanceId, TOKEN);
 
     res.json({
@@ -685,18 +684,17 @@ app.get("/wawp/status", async (req, res) => {
   const { instanceId } = req.query;
   if (!instanceId) return res.status(400).json({ ok: false, error: "instanceId required" });
   try {
-    const statusRes = await fetch(`https://api.wawp.net/v2/session/status?instance_id=${instanceId}&access_token=${WAWP_TOKEN}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + WAWP_TOKEN },
-      body: JSON.stringify({ access_token: WAWP_TOKEN, instance_id: instanceId }),
+    const statusRes = await fetch(`https://api.wawp.net/v2/session/info?instance_id=${instanceId}&access_token=${WAWP_TOKEN}`, {
+      method: "GET",
+      headers: { "Authorization": "Bearer " + WAWP_TOKEN },
     });
     const statusText = await statusRes.text();
     let statusData;
     try { statusData = JSON.parse(statusText); } catch { statusData = { raw: statusText.substring(0, 300) }; }
 
-    // الحالة WORKING تعني مرتبط
-    const status = statusData.status || (statusData.session && statusData.session.status) || "UNKNOWN";
-    const isConnected = status === "WORKING" || status === "CONNECTED" || status === "AUTHENTICATED";
+    const status = statusData.status || "UNKNOWN";
+    // مرتبط فقط لو WORKING (مو SCAN_QR_CODE / STARTING / STOPPED / FAILED)
+    const isConnected = status === "WORKING";
 
     res.json({ ok: true, status, isConnected, raw: statusData });
   } catch (e) {
