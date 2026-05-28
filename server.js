@@ -1,6 +1,7 @@
 // ═══════════════════════════════════════════════════════════
-// طاقة - Alert Server  v3.6
-// + ربط المرسلين (QR) + عتبات لكل مستلم + مستلمين متعددين
+// طاقة (TAQA) - Alert Server  v3.7
+// + ربط المرسلين (QR + رمز اقتران Pairing Code)
+// + عتبات لكل مستلم + مستلمين متعددين
 // + المفتاح الذكي + القاطع + تطبيع أسماء المكاتب
 // ═══════════════════════════════════════════════════════════
 
@@ -451,7 +452,7 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "3.6-pairdiag",
+    version: "3.7-pair",
     time: new Date().toISOString(),
     features: [
       "✅ Per-recipient custom alert thresholds (dynamic)",
@@ -646,6 +647,29 @@ app.get("/wawp/diag-qr", async (req, res) => {
     }
   }
   res.json({ ok: true, instanceId, results });
+});
+
+// طلب رمز اقتران (Pairing Code) - بديل QR
+app.post("/wawp/request-code", async (req, res) => {
+  const { instanceId, phone } = req.body || {};
+  if (!instanceId || !phone) return res.status(400).json({ ok: false, error: "instanceId and phone required" });
+  const cleanPhone = String(phone).replace(/[\s\-\+]/g, "").replace(/^00/, "");
+  try {
+    const r = await fetch(`https://api.wawp.net/v2/auth/request-code?instance_id=${instanceId}&access_token=${WAWP_TOKEN}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + WAWP_TOKEN },
+      body: JSON.stringify({ access_token: WAWP_TOKEN, instance_id: instanceId, phone: cleanPhone }),
+    });
+    const txt = await r.text();
+    let d; try { d = JSON.parse(txt); } catch { d = { raw: txt.substring(0, 200) }; }
+    const code = d.code || d.pairingCode || d.pairing_code || null;
+    if (!r.ok || !code) {
+      return res.status(r.status).json({ ok: false, error: d.message || "فشل طلب الرمز", detail: d });
+    }
+    res.json({ ok: true, code });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
 });
 
 // إنشاء instance جديد وإرجاع QR code (V2 - مؤكّد)
