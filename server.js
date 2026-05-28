@@ -61,6 +61,10 @@ function formatDuration(mins) {
 function normalizeOffice(office) {
   if (!office) return "";
   let s = String(office).trim();
+  // توافق: منيزلة/المنيزلة القديمة = شرق الأحساء
+  if (s === "منيزلة" || s === "المنيزلة" || s === "شرق الأحساء" || s === "شرق الاحساء") {
+    return "شرق الأحساء";
+  }
   // شيل "ال" من البداية
   if (s.startsWith("ال")) s = s.substring(2);
   return s;
@@ -261,27 +265,27 @@ function extractReport(id, raw, source) {
 function formatOutageDetails(r) {
   const lines = [];
   const type = r.outageType;
-  if (r.stationName) lines.push(`🏢 المحطة: ${r.stationName}`);
+  if (r.stationName) lines.push(`⭐ المحطة: ${r.stationName}`);
 
   if (type === "feeder" && r.feederName) {
-    lines.push(`🔌 المغذي: ${r.feederName}`);
-    if (r.busNumber) lines.push(`⚡ الباص: B${r.busNumber}`);
+    lines.push(`⭐ المغذي: ${r.feederName}`);
+    if (r.busNumber) lines.push(`⭐ الباص: B${r.busNumber}`);
   } else if (type === "bus") {
     if (r.busNumbers && r.busNumbers.length > 0) {
       const list = r.busNumbers.includes("all")
         ? "كل الباصات"
         : r.busNumbers.map((b) => `B${b}`).join("، ");
-      lines.push(`⚡ الباص/الباصات المتأثرة: ${list}`);
+      lines.push(`⭐ الباص/الباصات المتأثرة: ${list}`);
     } else if (r.busNumber) {
-      lines.push(`⚡ الباص: B${r.busNumber}`);
+      lines.push(`⭐ الباص: B${r.busNumber}`);
     } else {
-      lines.push(`⚡ نوع البلاغ: انقطاع باص`);
+      lines.push(`⭐ نوع البلاغ: انقطاع باص`);
     }
   } else if (type === "station") {
     lines.push(`⚠️ انقطاع محطة كامل`);
   } else {
-    if (r.feederName) lines.push(`🔌 المغذي: ${r.feederName}`);
-    if (r.busNumber) lines.push(`⚡ الباص: B${r.busNumber}`);
+    if (r.feederName) lines.push(`⭐ المغذي: ${r.feederName}`);
+    if (r.busNumber) lines.push(`⭐ الباص: B${r.busNumber}`);
   }
 
   // v3.1: المفاتيح الذكية (للمغذي)
@@ -397,14 +401,14 @@ async function checkAlerts() {
       const buildMsg = (threshold) => {
         const emoji = threshold >= 120 ? "🚨" : "⚠️";
         return `${emoji} *تنبيه تأخر انقطاع*\n\n` +
-          `📍 المكتب: ${r.office || "—"}\n` +
+          `⭐ المكتب: ${r.office || "—"}\n` +
           `${outageDetails}\n` +
-          `🗺 المناطق: ${r.affectedAreas || "—"}\n` +
-          `🕐 وقت الانقطاع: ${r.outageTime}\n` +
-          `⏱️ المدة: ${durationText}\n` +
-          `👥 المتأثرين: ${r.totalAffected || "-"} | المتبقي: ${r.remainingCount !== undefined ? r.remainingCount : "—"}\n` +
-          (r.sensitive ? `🔴 مشتركون حساسون: ${r.sensitive}\n` : "") +
-          (r.reason ? `📋 السبب: ${r.reason}\n` : "") +
+          `⭐ المناطق: ${r.affectedAreas || "—"}\n` +
+          `⭐ وقت الانقطاع: ${r.outageTime}\n` +
+          `⭐ المدة: ${durationText}\n` +
+          `⭐ المتأثرين: ${r.totalAffected || "-"} | المتبقي: ${r.remainingCount !== undefined ? r.remainingCount : "—"}\n` +
+          (r.sensitive ? `⭐ مشتركون حساسون: ${r.sensitive}\n` : "") +
+          (r.reason ? `⭐ السبب: ${r.reason}\n` : "") +
           smartKeyWarning +
           breakerWarning +
           `\n⚠️ البلاغ تجاوز ${formatDuration(threshold)} ولم يُكتمل بعد`;
@@ -470,7 +474,7 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "3.9-fallback",
+    version: "3.9-eastahsa",
     time: new Date().toISOString(),
     features: [
       "✅ Per-recipient custom alert thresholds (dynamic)",
