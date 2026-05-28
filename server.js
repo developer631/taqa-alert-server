@@ -1,6 +1,7 @@
 // ═══════════════════════════════════════════════════════════
-// طاقة - Alert Server  v3.0
-// + المفتاح الذكي: الحالة من آخر مرحلة إعادة
+// طاقة - Alert Server  v3.6
+// + ربط المرسلين (QR) + عتبات لكل مستلم + مستلمين متعددين
+// + المفتاح الذكي + القاطع + تطبيع أسماء المكاتب
 // ═══════════════════════════════════════════════════════════
 
 const express = require("express");
@@ -9,6 +10,15 @@ const admin = require("firebase-admin");
 
 const app = express();
 app.use(express.json());
+
+// v3.6: السماح بطلبات المتصفح من أي نطاق (CORS)
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
 
 const PORT = process.env.PORT || 3000;
 
@@ -35,13 +45,40 @@ const WA_TARGET = process.env.WA_TARGET || "";
 const ALERT_THRESHOLDS = [80, 120];
 const RIYADH_OFFSET_MS = 3 * 3600 * 1000;
 
-// نتائج المفتاح الذكي في كل مرحلة
-const SK_RESULT_MAP = {
-  ok: "✅ نجح",
+// v3.4: تنسيق مدة بالدقائق إلى نص عربي
+function formatDuration(mins) {
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  if (h > 0 && m > 0) return `${h} ساعة ${m} دقيقة`;
+  if (h > 0) return `${h} ساعة`;
+  return `${m} دقيقة`;
+}
+
+// v3.5: تطبيع اسم المكتب (يشيل "ال" التعريف والمسافات) للمطابقة المرنة
+function normalizeOffice(office) {
+  if (!office) return "";
+  let s = String(office).trim();
+  // شيل "ال" من البداية
+  if (s.startsWith("ال")) s = s.substring(2);
+  return s;
+}
+
+// خريطة حالات المفتاح الذكي (موحدة)
+const SK_STATUS_MAP = {
+  ok: "✅ يعمل",
   not_responding: "🔴 لا يستجيب",
   offline: "🟠 أوف لاين",
-  not_in_zenon: "🟡 غير مضاف بالزنون",
+  not_in_zenon: "🟡 غير مضاف بنظام الزنون",
   failed_other: "⚠️ فشل لسبب آخر",
+};
+
+// خريطة قديمة (للتوافق)
+const SK_RESULT_MAP = SK_STATUS_MAP;
+
+// v3.2: خريطة نتائج القاطع
+const BREAKER_RESULT_MAP = {
+  scada_no_response: "🔴 لا يستجيب",
+  local: "✅ لوكل",
 };
 
 async function sendOSNotif(title, body, office) {
@@ -63,20 +100,23 @@ async function sendOSNotif(title, body, office) {
   } catch (e) { console.error("❌ OS error:", e.message); }
 }
 
-async function sendWA(phone, message) {
+async function sendWA(phone, message, customInstance) {
   if (!phone) return { ok: false, error: "no phone" };
   const cleanPhone = String(phone).replace(/[\s\-\+]/g, "").replace(/^00/, "").replace(/@c\.us$/, "");
   const chatId = cleanPhone + "@c.us";
+  // v3.6: استخدم instance مخصص لو متوفر، وإلا الرئيسي
+  const instanceId = (customInstance && customInstance.instanceId) || WAWP_INSTANCE;
+  const token = (customInstance && customInstance.token) || WAWP_TOKEN;
   try {
     const res = await fetch("https://api.wawp.net/v2/send/text", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${WAWP_TOKEN}`,
+        "Authorization": `Bearer ${token}`,
       },
       body: JSON.stringify({
-        instance_id: WAWP_INSTANCE,
-        access_token: WAWP_TOKEN,
+        instance_id: instanceId,
+        access_token: token,
         chatId: chatId,
         message: message,
       }),
@@ -84,7 +124,7 @@ async function sendWA(phone, message) {
     const text = await res.text();
     let data;
     try { data = JSON.parse(text); } catch { data = { raw: text.substring(0, 300) }; }
-    console.log(`📤 WA → ${chatId}: ${res.status}`);
+    console.log(`📤 WA → ${chatId}: ${res.status} [instance: ${instanceId}]`);
     return { ok: res.ok, status: res.status, data };
   } catch (e) {
     console.error("❌ WA error:", e.message);
@@ -133,10 +173,29 @@ function getLatestSmartKeyAttempt(stages) {
   if (!Array.isArray(stages)) return null;
   for (let i = stages.length - 1; i >= 0; i--) {
     if (stages[i].by === "مفتاح ذكي" && stages[i].smartKeyResult) {
-      return stages[i].smartKeyResult;
+      return {
+        keyId: stages[i].smartKeyId || null,
+        result: stages[i].smartKeyResult,
+      };
     }
   }
   return null;
+}
+
+// v3.2: حالة القاطع من حقل البلاغ مباشرة (مو المراحل)
+function getBreakerStatus(raw, data) {
+  return data.breakerStatus || raw.breakerStatus || null;
+}
+
+// v3.1: استخراج قائمة المفاتيح الذكية (مع دعم الصيغة القديمة)
+function getSmartKeysList(raw, data) {
+  const sk = data.smartKeys || raw.smartKeys;
+  if (Array.isArray(sk)) return sk;
+  // دعم الصيغة القديمة
+  const oldKey = data.smartKey || raw.smartKey;
+  const oldStatus = data.smartKeyStatus || raw.smartKeyStatus;
+  if (oldKey) return [{ id: oldKey, status: oldStatus || "ok" }];
+  return [];
 }
 
 function extractReport(id, raw, source) {
@@ -159,9 +218,11 @@ function extractReport(id, raw, source) {
     stationId: data.stationId || raw.stationId,
     feederName: data.feederName || raw.feederName,
     feederId: data.feederId || raw.feederId,
-    // v3.0: المفتاح الذكي
-    smartKey: data.smartKey || raw.smartKey,
-    latestSmartKeyResult: getLatestSmartKeyAttempt(stages),
+    // v3.1: قائمة المفاتيح الذكية
+    smartKeys: getSmartKeysList(raw, data),
+    latestSmartKeyAttempt: getLatestSmartKeyAttempt(stages),
+    // v3.2: حالة القاطع (من حقل البلاغ)
+    breakerStatus: getBreakerStatus(raw, data),
     busNumber: busNumber,
     busNumbers: buses,
     affectedAreas: data.affectedAreas || raw.affectedAreas || data.areas || raw.areas,
@@ -173,6 +234,8 @@ function extractReport(id, raw, source) {
     status: raw.status || data.status,
     createdAt: raw.createdAt || data.createdAt,
     stages: stages,
+    // v3.6: instance المرسِل (لإرسال التنبيهات من رقمه)
+    senderWawp: data.senderWawp || raw.senderWawp || null,
   };
 }
 
@@ -202,13 +265,32 @@ function formatOutageDetails(r) {
     if (r.busNumber) lines.push(`⚡ الباص: B${r.busNumber}`);
   }
 
-  // v3.0: المفتاح الذكي (للمغذي)
-  if (type === "feeder" && r.smartKey) {
-    let skLine = `🔑 المفتاح الذكي: SK#${r.smartKey}`;
-    if (r.latestSmartKeyResult) {
-      skLine += ` — ${SK_RESULT_MAP[r.latestSmartKeyResult] || r.latestSmartKeyResult}`;
+  // v3.1: المفاتيح الذكية (للمغذي)
+  if (type === "feeder" && r.smartKeys && r.smartKeys.length > 0) {
+    if (r.smartKeys.length === 1) {
+      const k = r.smartKeys[0];
+      const statusText = SK_STATUS_MAP[k.status] || "";
+      lines.push(`🔑 المفتاح الذكي: SK#${k.id}${statusText ? " — " + statusText : ""}`);
+    } else {
+      lines.push(`🔑 المفاتيح الذكية (${r.smartKeys.length}):`);
+      r.smartKeys.forEach(k => {
+        const statusText = SK_STATUS_MAP[k.status] || "";
+        lines.push(`   • SK#${k.id}${statusText ? " — " + statusText : ""}`);
+      });
     }
-    lines.push(skLine);
+    // أحدث محاولة في المراحل
+    if (r.latestSmartKeyAttempt) {
+      const att = r.latestSmartKeyAttempt;
+      const resultLabel = SK_STATUS_MAP[att.result] || att.result;
+      const keyLabel = att.keyId ? `SK#${att.keyId}` : "";
+      lines.push(`📌 آخر محاولة: ${keyLabel ? keyLabel + " — " : ""}${resultLabel}`);
+    }
+  }
+
+  // v3.2: القاطع SCADA (من حقل البلاغ، متاح لكل الأنواع)
+  if (r.breakerStatus) {
+    const resultLabel = BREAKER_RESULT_MAP[r.breakerStatus] || r.breakerStatus;
+    lines.push(`🔧 القاطع (SCADA): ${resultLabel}`);
   }
 
   return lines.join("\n");
@@ -218,15 +300,42 @@ async function checkAlerts() {
   console.log("🔍 Checking outage alerts...", new Date().toISOString());
   if (!db) return { ok: false, error: "no db" };
   try {
-    const [oldReportsSnap, newReportsSnap, alertedSnap] = await Promise.all([
+    const [oldReportsSnap, newReportsSnap, alertedSnap, recipientsSnap] = await Promise.all([
       db.ref("reports").once("value"),
       db.ref("reports2/outages").once("value"),
       db.ref("alerted").once("value"),
+      db.ref("reports2/alertRecipients").once("value"),
     ]);
     const oldReports = oldReportsSnap.val() || {};
     const newReports = newReportsSnap.val() || {};
     const alerted = alertedSnap.val() || {};
     const newAlerted = { ...alerted };
+
+    // v3.3: قائمة المستلمين (مجمّعة حسب المكتب، دعم مكاتب متعددة)
+    const recipientsData = recipientsSnap.val() || {};
+    // v3.4: المستلمين مع عتباتهم الخاصة، مجمّعين حسب المكتب
+    const recipientsByOffice = {};
+    Object.entries(recipientsData).forEach(([recipId, r]) => {
+      if (!r.phone) return;
+      let offices = [];
+      if (Array.isArray(r.offices)) offices = r.offices;
+      else if (r.office) offices = [r.office];
+      // عتبات المستلم (بالدقائق)، احتياطي 80+120 للصيغة القديمة
+      let thresholds = Array.isArray(r.thresholds) && r.thresholds.length > 0
+        ? r.thresholds
+        : [80, 120];
+      offices.forEach(office => {
+        if (!office) return;
+        const key = normalizeOffice(office);  // v3.5: مطابقة مرنة
+        if (!recipientsByOffice[key]) recipientsByOffice[key] = [];
+        recipientsByOffice[key].push({
+          id: recipId,
+          name: r.name || "",
+          phone: r.phone,
+          thresholds: thresholds,
+        });
+      });
+    });
 
     const allReports = [];
     for (const [id, raw] of Object.entries(oldReports)) allReports.push(extractReport(id, raw, "reports"));
@@ -240,38 +349,35 @@ async function checkAlerts() {
       activeFound++;
       const mins = calcOutageMinutes(r.outageTime, r.createdAt);
 
-      let triggered = null;
-      for (const t of [...ALERT_THRESHOLDS].sort((a, b) => b - a)) {
-        const key = `${r.id}_${t}`;
-        if (mins >= t && !alerted[key]) {
-          triggered = { threshold: t, key };
-          break;
-        }
-      }
-      if (!triggered) continue;
-
-      const { threshold, key } = triggered;
       const hours = Math.floor(mins / 60);
       const remainingMins = mins % 60;
       const durationText = hours > 0 ? `${hours} ساعة ${remainingMins} دقيقة` : `${mins} دقيقة`;
-      const emoji = threshold >= 120 ? "🚨" : "⚠️";
-      const title = `${emoji} تجاوز ${threshold} دقيقة`;
       const outageDetails = formatOutageDetails(r);
 
-      // v3.0: تحذير لو آخر محاولة مفتاح ذكي فشلت
+      // تحذير المفاتيح الذكية
       let smartKeyWarning = "";
-      if (r.outageType === "feeder" && r.latestSmartKeyResult &&
-          ["not_responding", "offline", "failed_other"].includes(r.latestSmartKeyResult)) {
-        smartKeyWarning = `\n🔧 *تنبيه: محاولة المفتاح الذكي فشلت — يستلزم تدخل ميداني*\n`;
+      if (r.outageType === "feeder") {
+        const problemStatuses = ["not_responding", "offline", "failed_other"];
+        const problemKeys = (r.smartKeys || []).filter(k => problemStatuses.includes(k.status));
+        const lastAttemptFailed = r.latestSmartKeyAttempt &&
+          problemStatuses.includes(r.latestSmartKeyAttempt.result);
+        if (lastAttemptFailed) {
+          smartKeyWarning = `\n🔧 *تنبيه: آخر محاولة مفتاح ذكي فشلت — يستلزم تدخل ميداني*\n`;
+        } else if (problemKeys.length > 0) {
+          smartKeyWarning = `\n🔧 *تنبيه: ${problemKeys.length} مفتاح ذكي معطّل*\n`;
+        }
       }
 
-      console.log(`${emoji} ALERT: id=${r.id} office=${r.office} type=${r.outageType} mins=${mins} threshold=${threshold} skResult=${r.latestSmartKeyResult || "-"} [${r.source}]`);
+      // تحذير القاطع
+      let breakerWarning = "";
+      if (r.breakerStatus === "scada_no_response") {
+        breakerWarning = `\n🔧 *تنبيه: القاطع لا يستجيب — يستلزم فني محطات*\n`;
+      }
 
-      const pushBody = `${r.office || "-"}\nالانقطاع: ${r.outageTime} (${durationText})`;
-      await sendOSNotif(title, pushBody, r.office);
-
-      if (WA_TARGET) {
-        const waMsg = `${emoji} *تنبيه تأخر انقطاع*\n\n` +
+      // دالة بناء نص الرسالة لعتبة معينة
+      const buildMsg = (threshold) => {
+        const emoji = threshold >= 120 ? "🚨" : "⚠️";
+        return `${emoji} *تنبيه تأخر انقطاع*\n\n` +
           `📍 المكتب: ${r.office || "—"}\n` +
           `${outageDetails}\n` +
           `🗺 المناطق: ${r.affectedAreas || "—"}\n` +
@@ -281,11 +387,45 @@ async function checkAlerts() {
           (r.sensitive ? `🔴 مشتركون حساسون: ${r.sensitive}\n` : "") +
           (r.reason ? `📋 السبب: ${r.reason}\n` : "") +
           smartKeyWarning +
-          `\n⚠️ البلاغ تجاوز ${threshold} دقيقة ولم يُكتمل بعد`;
-        await sendWA(WA_TARGET, waMsg);
+          breakerWarning +
+          `\n⚠️ البلاغ تجاوز ${formatDuration(threshold)} ولم يُكتمل بعد`;
+      };
+
+      // v3.6: instance المرسِل (صاحب البلاغ) - أو الرئيسي احتياطياً
+      const senderInstance = (r.senderWawp && r.senderWawp.instanceId) ? r.senderWawp : null;
+
+      // ─── WA_TARGET: الرقم الرئيسي (عتبات افتراضية 80/120) ───
+      if (WA_TARGET) {
+        for (const t of [...ALERT_THRESHOLDS].sort((a, b) => a - b)) {
+          const key = `${r.id}_MAIN_${t}`;
+          if (mins >= t && !alerted[key]) {
+            await sendWA(WA_TARGET, buildMsg(t), senderInstance);
+            const emoji = t >= 120 ? "🚨" : "⚠️";
+            await sendOSNotif(`${emoji} تجاوز ${formatDuration(t)}`,
+              `${r.office || "-"}\nالانقطاع: ${r.outageTime} (${durationText})`, r.office);
+            newAlerted[key] = Date.now();
+            alertsSent++;
+            console.log(`📤 MAIN alert: id=${r.id} t=${t}min sender=${senderInstance ? senderInstance.phone : "main"}`);
+          }
+        }
       }
-      newAlerted[key] = Date.now();
-      alertsSent++;
+
+      // ─── مستلمو المكتب: كل واحد حسب عتباته ───
+      const officeRecipients = recipientsByOffice[normalizeOffice(r.office)] || [];
+      const cleanTarget = String(WA_TARGET).replace(/[\s\-\+]/g, "").replace(/^00/, "");
+      for (const recip of officeRecipients) {
+        const cleanRecip = String(recip.phone).replace(/[\s\-\+]/g, "").replace(/^00/, "");
+        // فحص كل عتبة للمستلم
+        for (const t of [...recip.thresholds].sort((a, b) => a - b)) {
+          const key = `${r.id}_${recip.id}_${t}`;
+          if (mins >= t && !alerted[key]) {
+            await sendWA(recip.phone, buildMsg(t), senderInstance);
+            newAlerted[key] = Date.now();
+            alertsSent++;
+            console.log(`   📨 → ${recip.name} (${recip.phone}) t=${t}min [id=${r.id}]`);
+          }
+        }
+      }
     }
 
     const cutoff = Date.now() - 24 * 3600000;
@@ -311,14 +451,16 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "3.0",
+    version: "3.6-qrdiag",
     time: new Date().toISOString(),
     features: [
-      "✅ Smart key result from latest stage",
-      "✅ Field-team warning when SK attempt failed",
+      "✅ Per-recipient custom alert thresholds (dynamic)",
+      "✅ Per-office alert recipients (multiple phones)",
+      "✅ Multiple smart keys per feeder",
+      "✅ Breaker (SCADA) status: no-response / local",
       "✅ Asia/Riyadh timezone",
     ],
-    endpoints: ["GET /", "GET /config", "GET /check", "GET /reports", "GET /test-wa", "POST /send-wa"],
+    endpoints: ["GET /", "GET /config", "GET /check", "GET /reports", "GET /test-wa", "POST /send-wa", "GET /recipients"],
   });
 });
 
@@ -389,11 +531,193 @@ app.post("/send-wa", async (req, res) => {
   res.json(result);
 });
 
+// v3.3: عرض المستلمين (تشخيص)
+app.get("/recipients", async (req, res) => {
+  if (!db) return res.status(500).json({ ok: false, error: "no db" });
+  try {
+    const snap = await db.ref("reports2/alertRecipients").once("value");
+    const data = snap.val() || {};
+    const list = Object.entries(data).map(([id, r]) => ({ id, ...r }));
+    const byOffice = {};
+    list.forEach(r => {
+      let offices = [];
+      if (Array.isArray(r.offices)) offices = r.offices;
+      else if (r.office) offices = [r.office];
+      offices.forEach(o => {
+        if (!o) return;
+        byOffice[o] = (byOffice[o] || 0) + 1;
+      });
+    });
+    res.json({ ok: true, total: list.length, byOffice, recipients: list });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
+// v3.6: ربط المرسلين - إنشاء instance ومسح QR
+// ═══════════════════════════════════════════════════════════
+
+// تشخيص: جرّب إنشاء جلسة ورجّع كل المحاولات (GET للتجربة من المتصفح)
+app.get("/wawp/diag", async (req, res) => {
+  const attempts = [];
+  const TOKEN = WAWP_TOKEN;
+  const endpoints = [
+    { name: "V2 session/create POST", url: "https://api.wawp.net/v2/session/create?access_token=" + TOKEN, method: "POST", body: JSON.stringify({ access_token: TOKEN }) },
+    { name: "V2 session/start POST", url: "https://api.wawp.net/v2/session/start?access_token=" + TOKEN, method: "POST", body: JSON.stringify({ access_token: TOKEN }) },
+    { name: "V1 create_instance POST", url: "https://app.wawp.net/api/create_instance?access_token=" + TOKEN, method: "POST", body: JSON.stringify({ access_token: TOKEN }) },
+    { name: "V1 create_instance GET", url: "https://app.wawp.net/api/create_instance?access_token=" + TOKEN, method: "GET" },
+  ];
+  for (const ep of endpoints) {
+    try {
+      const opts = { method: ep.method, headers: { "Content-Type": "application/json", "Authorization": "Bearer " + TOKEN } };
+      if (ep.body) opts.body = ep.body;
+      const r = await fetch(ep.url, opts);
+      const t = await r.text();
+      let d; try { d = JSON.parse(t); } catch { d = { raw: t.substring(0, 400) }; }
+      attempts.push({ endpoint: ep.name, status: r.status, response: d });
+    } catch (e) {
+      attempts.push({ endpoint: ep.name, error: e.message });
+    }
+  }
+  res.json({ ok: true, token_used: TOKEN.substring(0, 6) + "...", attempts });
+});
+
+// تشخيص QR والحالة لـ instance معيّن (GET للتجربة من المتصفح)
+app.get("/wawp/diag-qr", async (req, res) => {
+  const TOKEN = WAWP_TOKEN;
+  const instanceId = req.query.instanceId;
+  if (!instanceId) return res.status(400).json({ ok: false, error: "أضف ?instanceId=XXXX" });
+
+  const results = {};
+  const tries = [
+    { name: "qr-image POST", url: `https://api.wawp.net/v2/auth/qr-image?instance_id=${instanceId}&access_token=${TOKEN}`, method: "POST" },
+    { name: "qr-image GET", url: `https://api.wawp.net/v2/auth/qr-image?instance_id=${instanceId}&access_token=${TOKEN}`, method: "GET" },
+    { name: "qr (raw) POST", url: `https://api.wawp.net/v2/auth/qr?instance_id=${instanceId}&access_token=${TOKEN}`, method: "POST" },
+    { name: "session/status POST", url: `https://api.wawp.net/v2/session/status?instance_id=${instanceId}&access_token=${TOKEN}`, method: "POST" },
+    { name: "session/info GET", url: `https://api.wawp.net/v2/session/info?instance_id=${instanceId}&access_token=${TOKEN}`, method: "GET" },
+  ];
+  for (const t of tries) {
+    try {
+      const opts = { method: t.method, headers: { "Content-Type": "application/json", "Authorization": "Bearer " + TOKEN } };
+      if (t.method === "POST") opts.body = JSON.stringify({ access_token: TOKEN, instance_id: instanceId });
+      const r = await fetch(t.url, opts);
+      const txt = await r.text();
+      let d; try { d = JSON.parse(txt); } catch { d = { raw: txt.substring(0, 200) }; }
+      // اختصر الـ QR الطويل
+      if (d.qr && d.qr.length > 60) d.qr = d.qr.substring(0, 60) + "...[truncated]";
+      if (d.base64 && d.base64.length > 60) d.base64 = d.base64.substring(0, 60) + "...[truncated]";
+      results[t.name] = { status: r.status, keys: Object.keys(d), data: d };
+    } catch (e) {
+      results[t.name] = { error: e.message };
+    }
+  }
+  res.json({ ok: true, instanceId, results });
+});
+
+// إنشاء instance جديد وإرجاع QR code (V2 - مؤكّد)
+app.post("/wawp/create-session", async (req, res) => {
+  const TOKEN = WAWP_TOKEN;
+  try {
+    // 1. إنشاء جلسة جديدة (V2)
+    const createRes = await fetch("https://api.wawp.net/v2/session/create?access_token=" + TOKEN, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + TOKEN },
+      body: JSON.stringify({ access_token: TOKEN }),
+    });
+    const createText = await createRes.text();
+    let createData;
+    try { createData = JSON.parse(createText); } catch { createData = { raw: createText.substring(0, 300) }; }
+
+    const instanceId = createData.instance_id || createData.instanceId;
+    if (!createRes.ok || !instanceId) {
+      return res.status(500).json({ ok: false, error: "فشل إنشاء الجلسة", detail: createData });
+    }
+
+    console.log(`✅ Session created: ${instanceId} (${createData.session_name})`);
+
+    // 2. انتظر شوي لين الـ engine يجهّز (5-15 ثانية حسب التوثيق)
+    await new Promise(r => setTimeout(r, 6000));
+
+    // 3. جلب QR
+    const qr = await fetchQRv2(instanceId, TOKEN);
+
+    res.json({
+      ok: true,
+      instanceId: instanceId,
+      token: TOKEN,
+      sessionName: createData.session_name || null,
+      qr: qr.qr,
+      qrRaw: qr.raw,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// دالة مساعدة: جلب QR (V2 qr-image)
+async function fetchQRv2(instanceId, token) {
+  try {
+    const r = await fetch(`https://api.wawp.net/v2/auth/qr-image?instance_id=${instanceId}&access_token=${token}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+      body: JSON.stringify({ access_token: token, instance_id: instanceId }),
+    });
+    const t = await r.text();
+    let d; try { d = JSON.parse(t); } catch { d = { raw: t.substring(0, 300) }; }
+    const qr = d.qr || d.base64 || d.qrcode || (d.data && d.data.qr) || null;
+    return { qr, raw: d, status: r.status };
+  } catch (e) {
+    return { qr: null, raw: { error: e.message } };
+  }
+}
+
+// جلب QR code من جديد (لو انتهت صلاحيته)
+app.get("/wawp/qr", async (req, res) => {
+  const { instanceId } = req.query;
+  if (!instanceId) return res.status(400).json({ ok: false, error: "instanceId required" });
+  const qr = await fetchQRv2(instanceId, WAWP_TOKEN);
+  res.json({ ok: true, qr: qr.qr, raw: qr.raw });
+});
+
+// فحص حالة instance (هل صار WORKING؟) - V2
+app.get("/wawp/status", async (req, res) => {
+  const { instanceId } = req.query;
+  if (!instanceId) return res.status(400).json({ ok: false, error: "instanceId required" });
+  try {
+    const statusRes = await fetch(`https://api.wawp.net/v2/session/status?instance_id=${instanceId}&access_token=${WAWP_TOKEN}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + WAWP_TOKEN },
+      body: JSON.stringify({ access_token: WAWP_TOKEN, instance_id: instanceId }),
+    });
+    const statusText = await statusRes.text();
+    let statusData;
+    try { statusData = JSON.parse(statusText); } catch { statusData = { raw: statusText.substring(0, 300) }; }
+
+    // الحالة WORKING تعني مرتبط
+    const status = statusData.status || (statusData.session && statusData.session.status) || "UNKNOWN";
+    const isConnected = status === "WORKING" || status === "CONNECTED" || status === "AUTHENTICATED";
+
+    res.json({ ok: true, status, isConnected, raw: statusData });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// إرسال رسالة اختبار من instance معين
+app.post("/wawp/test", async (req, res) => {
+  const { instanceId, token, phone } = req.body || {};
+  if (!instanceId || !phone) return res.status(400).json({ ok: false, error: "instanceId and phone required" });
+  const result = await sendWA(phone, "✅ تم ربط رقمك بنجاح بنظام طاقة!\n\nالآن بلاغاتك وتنبيهاتها ستُرسل من هذا الرقم.",
+    { instanceId, token: token || WAWP_TOKEN });
+  res.json(result);
+});
+
 app.use((req, res) => {
   res.status(404).json({
     ok: false,
     error: `route not found: ${req.method} ${req.path}`,
-    available: ["/", "/config", "/check", "/reports", "/test-wa", "/send-wa"],
+    available: ["/", "/config", "/check", "/reports", "/test-wa", "/send-wa", "/recipients"],
   });
 });
 
@@ -401,8 +725,8 @@ setInterval(checkAlerts, 5 * 60 * 1000);
 setTimeout(checkAlerts, 5000);
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server v3.0 running on port ${PORT}`);
+  console.log(`🚀 Server v3.6 running on port ${PORT}`);
   console.log(`🌍 Timezone: Asia/Riyadh (UTC+3)`);
-  console.log(`🔑 Smart key: status from latest stage attempt`);
+  console.log(`📱 Per-recipient custom alert thresholds`);
   console.log(`📞 WA_TARGET: ${WA_TARGET || "(not set)"}`);
 });
