@@ -558,45 +558,110 @@ app.get("/recipients", async (req, res) => {
 // v3.6: ربط المرسلين - إنشاء instance ومسح QR
 // ═══════════════════════════════════════════════════════════
 
+// تشخيص: جرّب إنشاء جلسة ورجّع كل المحاولات (GET للتجربة من المتصفح)
+app.get("/wawp/diag", async (req, res) => {
+  const attempts = [];
+  const TOKEN = WAWP_TOKEN;
+  const endpoints = [
+    { name: "V2 session/create POST", url: "https://api.wawp.net/v2/session/create?access_token=" + TOKEN, method: "POST", body: JSON.stringify({ access_token: TOKEN }) },
+    { name: "V2 session/start POST", url: "https://api.wawp.net/v2/session/start?access_token=" + TOKEN, method: "POST", body: JSON.stringify({ access_token: TOKEN }) },
+    { name: "V1 create_instance POST", url: "https://app.wawp.net/api/create_instance?access_token=" + TOKEN, method: "POST", body: JSON.stringify({ access_token: TOKEN }) },
+    { name: "V1 create_instance GET", url: "https://app.wawp.net/api/create_instance?access_token=" + TOKEN, method: "GET" },
+  ];
+  for (const ep of endpoints) {
+    try {
+      const opts = { method: ep.method, headers: { "Content-Type": "application/json", "Authorization": "Bearer " + TOKEN } };
+      if (ep.body) opts.body = ep.body;
+      const r = await fetch(ep.url, opts);
+      const t = await r.text();
+      let d; try { d = JSON.parse(t); } catch { d = { raw: t.substring(0, 400) }; }
+      attempts.push({ endpoint: ep.name, status: r.status, response: d });
+    } catch (e) {
+      attempts.push({ endpoint: ep.name, error: e.message });
+    }
+  }
+  res.json({ ok: true, token_used: TOKEN.substring(0, 6) + "...", attempts });
+});
+
 // إنشاء instance جديد وإرجاع QR code
 app.post("/wawp/create-session", async (req, res) => {
+  const attempts = [];
+  const TOKEN = WAWP_TOKEN;
+
+  // محاولة 1: V2 session/create (POST مع body)
   try {
-    // 1. إنشاء instance جديد (POST)
-    const createRes = await fetch("https://app.wawp.net/api/create_instance?access_token=" + WAWP_TOKEN, {
+    const r1 = await fetch("https://api.wawp.net/v2/session/create?access_token=" + TOKEN, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + TOKEN },
+      body: JSON.stringify({ access_token: TOKEN, start: true }),
     });
-    const createText = await createRes.text();
-    let createData;
-    try { createData = JSON.parse(createText); } catch { createData = { raw: createText.substring(0, 300) }; }
+    const t1 = await r1.text();
+    let d1; try { d1 = JSON.parse(t1); } catch { d1 = { raw: t1.substring(0, 500) }; }
+    attempts.push({ method: "V2 session/create", status: r1.status, data: d1 });
 
-    const instanceId = createData.instance_id || createData.instanceId || (createData.data && createData.data.instance_id);
-    if (!instanceId) {
-      return res.status(500).json({ ok: false, error: "فشل إنشاء instance", detail: createData });
+    // لو نجح واستخرجنا instance_id
+    const instId = d1.instance_id || d1.instanceId || (d1.data && d1.data.instance_id) || (d1.session && d1.session.instance_id);
+    if (r1.ok && instId) {
+      // جلب QR
+      const qr = await fetchQRv2(instId, TOKEN);
+      return res.json({ ok: true, instanceId: instId, token: TOKEN, qr: qr.qr, via: "v2", raw: d1, qrRaw: qr.raw });
     }
+  } catch (e) {
+    attempts.push({ method: "V2 session/create", error: e.message });
+  }
 
-    // 2. جلب QR code (POST)
-    const qrRes = await fetch(`https://app.wawp.net/api/get_qrcode?instance_id=${instanceId}&access_token=${WAWP_TOKEN}`, {
+  // محاولة 2: V1 create_instance (POST)
+  try {
+    const r2 = await fetch("https://app.wawp.net/api/create_instance?access_token=" + TOKEN, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ access_token: TOKEN }),
+    });
+    const t2 = await r2.text();
+    let d2; try { d2 = JSON.parse(t2); } catch { d2 = { raw: t2.substring(0, 500) }; }
+    attempts.push({ method: "V1 create_instance", status: r2.status, data: d2 });
+
+    const instId = d2.instance_id || d2.instanceId || (d2.data && d2.data.instance_id);
+    if (r2.ok && instId) {
+      const qr = await fetchQRv2(instId, TOKEN);
+      return res.json({ ok: true, instanceId: instId, token: TOKEN, qr: qr.qr, via: "v1", raw: d2, qrRaw: qr.raw });
+    }
+  } catch (e) {
+    attempts.push({ method: "V1 create_instance", error: e.message });
+  }
+
+  // فشلت كل المحاولات - رجّع التشخيص
+  res.status(500).json({ ok: false, error: "فشل إنشاء instance", attempts });
+});
+
+// دالة مساعدة: جلب QR بصيغ متعددة
+async function fetchQRv2(instanceId, token) {
+  // جرّب V2 أول
+  try {
+    const r = await fetch(`https://api.wawp.net/v2/session/qr?instance_id=${instanceId}&access_token=${token}`, {
+      method: "GET",
+      headers: { "Authorization": "Bearer " + token },
+    });
+    const t = await r.text();
+    let d; try { d = JSON.parse(t); } catch { d = { raw: t.substring(0, 300) }; }
+    const qr = d.qr || d.base64 || d.qrcode || (d.data && d.data.qr) || null;
+    if (qr) return { qr, raw: d };
+  } catch (e) { /* تجاهل */ }
+
+  // جرّب V1
+  try {
+    const r = await fetch(`https://app.wawp.net/api/get_qrcode?instance_id=${instanceId}&access_token=${token}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
     });
-    const qrText = await qrRes.text();
-    let qrData;
-    try { qrData = JSON.parse(qrText); } catch { qrData = { raw: qrText.substring(0, 300) }; }
-
-    const qrImage = qrData.base64 || qrData.qr || (qrData.data && qrData.data.qrcode) || null;
-
-    res.json({
-      ok: true,
-      instanceId: instanceId,
-      token: WAWP_TOKEN,
-      qr: qrImage,
-      raw: qrData,
-    });
+    const t = await r.text();
+    let d; try { d = JSON.parse(t); } catch { d = { raw: t.substring(0, 300) }; }
+    const qr = d.base64 || d.qr || (d.data && d.data.qrcode) || null;
+    return { qr, raw: d };
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    return { qr: null, raw: { error: e.message } };
   }
-});
+}
 
 // جلب QR code من جديد (لو انتهت صلاحيته)
 app.get("/wawp/qr", async (req, res) => {
