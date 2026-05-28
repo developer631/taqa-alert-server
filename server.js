@@ -452,7 +452,7 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "3.7-pair",
+    version: "3.7-pair2",
     time: new Date().toISOString(),
     features: [
       "✅ Per-recipient custom alert thresholds (dynamic)",
@@ -658,7 +658,7 @@ app.post("/wawp/request-code", async (req, res) => {
     const r = await fetch(`https://api.wawp.net/v2/auth/request-code?instance_id=${instanceId}&access_token=${WAWP_TOKEN}`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": "Bearer " + WAWP_TOKEN },
-      body: JSON.stringify({ access_token: WAWP_TOKEN, instance_id: instanceId, phone: cleanPhone }),
+      body: JSON.stringify({ access_token: WAWP_TOKEN, instance_id: instanceId, phone: cleanPhone, phone_number: cleanPhone, phoneNumber: cleanPhone }),
     });
     const txt = await r.text();
     let d; try { d = JSON.parse(txt); } catch { d = { raw: txt.substring(0, 200) }; }
