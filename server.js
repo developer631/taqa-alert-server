@@ -35,13 +35,22 @@ const WA_TARGET = process.env.WA_TARGET || "";
 const ALERT_THRESHOLDS = [80, 120];
 const RIYADH_OFFSET_MS = 3 * 3600 * 1000;
 
-// نتائج المفتاح الذكي في كل مرحلة
-const SK_RESULT_MAP = {
-  ok: "✅ نجح",
+// خريطة حالات المفتاح الذكي (موحدة)
+const SK_STATUS_MAP = {
+  ok: "✅ يعمل",
   not_responding: "🔴 لا يستجيب",
   offline: "🟠 أوف لاين",
-  not_in_zenon: "🟡 غير مضاف بالزنون",
+  not_in_zenon: "🟡 غير مضاف بنظام الزنون",
   failed_other: "⚠️ فشل لسبب آخر",
+};
+
+// خريطة قديمة (للتوافق)
+const SK_RESULT_MAP = SK_STATUS_MAP;
+
+// v3.2: خريطة نتائج القاطع
+const BREAKER_RESULT_MAP = {
+  scada_no_response: "🔴 لا يستجيب",
+  local: "✅ لوكل",
 };
 
 async function sendOSNotif(title, body, office) {
@@ -133,10 +142,29 @@ function getLatestSmartKeyAttempt(stages) {
   if (!Array.isArray(stages)) return null;
   for (let i = stages.length - 1; i >= 0; i--) {
     if (stages[i].by === "مفتاح ذكي" && stages[i].smartKeyResult) {
-      return stages[i].smartKeyResult;
+      return {
+        keyId: stages[i].smartKeyId || null,
+        result: stages[i].smartKeyResult,
+      };
     }
   }
   return null;
+}
+
+// v3.2: حالة القاطع من حقل البلاغ مباشرة (مو المراحل)
+function getBreakerStatus(raw, data) {
+  return data.breakerStatus || raw.breakerStatus || null;
+}
+
+// v3.1: استخراج قائمة المفاتيح الذكية (مع دعم الصيغة القديمة)
+function getSmartKeysList(raw, data) {
+  const sk = data.smartKeys || raw.smartKeys;
+  if (Array.isArray(sk)) return sk;
+  // دعم الصيغة القديمة
+  const oldKey = data.smartKey || raw.smartKey;
+  const oldStatus = data.smartKeyStatus || raw.smartKeyStatus;
+  if (oldKey) return [{ id: oldKey, status: oldStatus || "ok" }];
+  return [];
 }
 
 function extractReport(id, raw, source) {
@@ -159,9 +187,11 @@ function extractReport(id, raw, source) {
     stationId: data.stationId || raw.stationId,
     feederName: data.feederName || raw.feederName,
     feederId: data.feederId || raw.feederId,
-    // v3.0: المفتاح الذكي
-    smartKey: data.smartKey || raw.smartKey,
-    latestSmartKeyResult: getLatestSmartKeyAttempt(stages),
+    // v3.1: قائمة المفاتيح الذكية
+    smartKeys: getSmartKeysList(raw, data),
+    latestSmartKeyAttempt: getLatestSmartKeyAttempt(stages),
+    // v3.2: حالة القاطع (من حقل البلاغ)
+    breakerStatus: getBreakerStatus(raw, data),
     busNumber: busNumber,
     busNumbers: buses,
     affectedAreas: data.affectedAreas || raw.affectedAreas || data.areas || raw.areas,
@@ -202,13 +232,32 @@ function formatOutageDetails(r) {
     if (r.busNumber) lines.push(`⚡ الباص: B${r.busNumber}`);
   }
 
-  // v3.0: المفتاح الذكي (للمغذي)
-  if (type === "feeder" && r.smartKey) {
-    let skLine = `🔑 المفتاح الذكي: SK#${r.smartKey}`;
-    if (r.latestSmartKeyResult) {
-      skLine += ` — ${SK_RESULT_MAP[r.latestSmartKeyResult] || r.latestSmartKeyResult}`;
+  // v3.1: المفاتيح الذكية (للمغذي)
+  if (type === "feeder" && r.smartKeys && r.smartKeys.length > 0) {
+    if (r.smartKeys.length === 1) {
+      const k = r.smartKeys[0];
+      const statusText = SK_STATUS_MAP[k.status] || "";
+      lines.push(`🔑 المفتاح الذكي: SK#${k.id}${statusText ? " — " + statusText : ""}`);
+    } else {
+      lines.push(`🔑 المفاتيح الذكية (${r.smartKeys.length}):`);
+      r.smartKeys.forEach(k => {
+        const statusText = SK_STATUS_MAP[k.status] || "";
+        lines.push(`   • SK#${k.id}${statusText ? " — " + statusText : ""}`);
+      });
     }
-    lines.push(skLine);
+    // أحدث محاولة في المراحل
+    if (r.latestSmartKeyAttempt) {
+      const att = r.latestSmartKeyAttempt;
+      const resultLabel = SK_STATUS_MAP[att.result] || att.result;
+      const keyLabel = att.keyId ? `SK#${att.keyId}` : "";
+      lines.push(`📌 آخر محاولة: ${keyLabel ? keyLabel + " — " : ""}${resultLabel}`);
+    }
+  }
+
+  // v3.2: القاطع SCADA (من حقل البلاغ، متاح لكل الأنواع)
+  if (r.breakerStatus) {
+    const resultLabel = BREAKER_RESULT_MAP[r.breakerStatus] || r.breakerStatus;
+    lines.push(`🔧 القاطع (SCADA): ${resultLabel}`);
   }
 
   return lines.join("\n");
@@ -218,15 +267,32 @@ async function checkAlerts() {
   console.log("🔍 Checking outage alerts...", new Date().toISOString());
   if (!db) return { ok: false, error: "no db" };
   try {
-    const [oldReportsSnap, newReportsSnap, alertedSnap] = await Promise.all([
+    const [oldReportsSnap, newReportsSnap, alertedSnap, recipientsSnap] = await Promise.all([
       db.ref("reports").once("value"),
       db.ref("reports2/outages").once("value"),
       db.ref("alerted").once("value"),
+      db.ref("reports2/alertRecipients").once("value"),
     ]);
     const oldReports = oldReportsSnap.val() || {};
     const newReports = newReportsSnap.val() || {};
     const alerted = alertedSnap.val() || {};
     const newAlerted = { ...alerted };
+
+    // v3.3: قائمة المستلمين (مجمّعة حسب المكتب، دعم مكاتب متعددة)
+    const recipientsData = recipientsSnap.val() || {};
+    const recipientsByOffice = {};
+    Object.values(recipientsData).forEach(r => {
+      if (!r.phone) return;
+      // دعم الصيغة الجديدة (offices مصفوفة) + القديمة (office نص)
+      let offices = [];
+      if (Array.isArray(r.offices)) offices = r.offices;
+      else if (r.office) offices = [r.office];
+      offices.forEach(office => {
+        if (!office) return;
+        if (!recipientsByOffice[office]) recipientsByOffice[office] = [];
+        recipientsByOffice[office].push({ name: r.name || "", phone: r.phone });
+      });
+    });
 
     const allReports = [];
     for (const [id, raw] of Object.entries(oldReports)) allReports.push(extractReport(id, raw, "reports"));
@@ -258,32 +324,67 @@ async function checkAlerts() {
       const title = `${emoji} تجاوز ${threshold} دقيقة`;
       const outageDetails = formatOutageDetails(r);
 
-      // v3.0: تحذير لو آخر محاولة مفتاح ذكي فشلت
+      // v3.1: تحذير لو فيه مفاتيح متعطلة أو آخر محاولة فشلت
       let smartKeyWarning = "";
-      if (r.outageType === "feeder" && r.latestSmartKeyResult &&
-          ["not_responding", "offline", "failed_other"].includes(r.latestSmartKeyResult)) {
-        smartKeyWarning = `\n🔧 *تنبيه: محاولة المفتاح الذكي فشلت — يستلزم تدخل ميداني*\n`;
+      if (r.outageType === "feeder") {
+        const problemStatuses = ["not_responding", "offline", "failed_other"];
+        const problemKeys = (r.smartKeys || []).filter(k => problemStatuses.includes(k.status));
+        const lastAttemptFailed = r.latestSmartKeyAttempt &&
+          problemStatuses.includes(r.latestSmartKeyAttempt.result);
+
+        if (lastAttemptFailed) {
+          smartKeyWarning = `\n🔧 *تنبيه: آخر محاولة مفتاح ذكي فشلت — يستلزم تدخل ميداني*\n`;
+        } else if (problemKeys.length > 0) {
+          smartKeyWarning = `\n🔧 *تنبيه: ${problemKeys.length} مفتاح ذكي معطّل*\n`;
+        }
       }
 
-      console.log(`${emoji} ALERT: id=${r.id} office=${r.office} type=${r.outageType} mins=${mins} threshold=${threshold} skResult=${r.latestSmartKeyResult || "-"} [${r.source}]`);
+      // v3.2: تحذير القاطع (من حقل البلاغ)
+      let breakerWarning = "";
+      if (r.breakerStatus === "scada_no_response") {
+        breakerWarning = `\n🔧 *تنبيه: القاطع لا يستجيب — يستلزم فني محطات*\n`;
+      }
+
+      const skCount = (r.smartKeys || []).length;
+      const latestRes = r.latestSmartKeyAttempt ? r.latestSmartKeyAttempt.result : "-";
+      console.log(`${emoji} ALERT: id=${r.id} office=${r.office} type=${r.outageType} mins=${mins} threshold=${threshold} SKs=${skCount} latest=${latestRes} [${r.source}]`);
 
       const pushBody = `${r.office || "-"}\nالانقطاع: ${r.outageTime} (${durationText})`;
       await sendOSNotif(title, pushBody, r.office);
 
+      // بناء نص الرسالة
+      const waMsg = `${emoji} *تنبيه تأخر انقطاع*\n\n` +
+        `📍 المكتب: ${r.office || "—"}\n` +
+        `${outageDetails}\n` +
+        `🗺 المناطق: ${r.affectedAreas || "—"}\n` +
+        `🕐 وقت الانقطاع: ${r.outageTime}\n` +
+        `⏱️ المدة: ${durationText}\n` +
+        `👥 المتأثرين: ${r.totalAffected || "-"} | المتبقي: ${r.remainingCount !== undefined ? r.remainingCount : "—"}\n` +
+        (r.sensitive ? `🔴 مشتركون حساسون: ${r.sensitive}\n` : "") +
+        (r.reason ? `📋 السبب: ${r.reason}\n` : "") +
+        smartKeyWarning +
+        breakerWarning +
+        `\n⚠️ البلاغ تجاوز ${threshold} دقيقة ولم يُكتمل بعد`;
+
+      // أرسل لـ WA_TARGET (الرقم الرئيسي - يستقبل كل التنبيهات)
       if (WA_TARGET) {
-        const waMsg = `${emoji} *تنبيه تأخر انقطاع*\n\n` +
-          `📍 المكتب: ${r.office || "—"}\n` +
-          `${outageDetails}\n` +
-          `🗺 المناطق: ${r.affectedAreas || "—"}\n` +
-          `🕐 وقت الانقطاع: ${r.outageTime}\n` +
-          `⏱️ المدة: ${durationText}\n` +
-          `👥 المتأثرين: ${r.totalAffected || "-"} | المتبقي: ${r.remainingCount !== undefined ? r.remainingCount : "—"}\n` +
-          (r.sensitive ? `🔴 مشتركون حساسون: ${r.sensitive}\n` : "") +
-          (r.reason ? `📋 السبب: ${r.reason}\n` : "") +
-          smartKeyWarning +
-          `\n⚠️ البلاغ تجاوز ${threshold} دقيقة ولم يُكتمل بعد`;
         await sendWA(WA_TARGET, waMsg);
       }
+
+      // v3.3: أرسل لمستلمي المكتب المتأثر
+      const officeRecipients = recipientsByOffice[r.office] || [];
+      for (const recip of officeRecipients) {
+        // تجنّب الإرسال المكرر لو نفس رقم WA_TARGET
+        const cleanRecip = String(recip.phone).replace(/[\s\-\+]/g, "").replace(/^00/, "");
+        const cleanTarget = String(WA_TARGET).replace(/[\s\-\+]/g, "").replace(/^00/, "");
+        if (cleanRecip === cleanTarget) continue;
+        await sendWA(recip.phone, waMsg);
+        console.log(`   📨 → ${recip.name} (${recip.phone})`);
+      }
+      if (officeRecipients.length > 0) {
+        console.log(`   📊 أُرسل لـ ${officeRecipients.length} مستلم في مكتب ${r.office}`);
+      }
+
       newAlerted[key] = Date.now();
       alertsSent++;
     }
@@ -311,14 +412,16 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "3.0",
+    version: "3.3",
     time: new Date().toISOString(),
     features: [
-      "✅ Smart key result from latest stage",
-      "✅ Field-team warning when SK attempt failed",
+      "✅ Per-office alert recipients (multiple phones)",
+      "✅ Multiple smart keys per feeder",
+      "✅ Breaker (SCADA) status: no-response / local",
+      "✅ Field-team warnings",
       "✅ Asia/Riyadh timezone",
     ],
-    endpoints: ["GET /", "GET /config", "GET /check", "GET /reports", "GET /test-wa", "POST /send-wa"],
+    endpoints: ["GET /", "GET /config", "GET /check", "GET /reports", "GET /test-wa", "POST /send-wa", "GET /recipients"],
   });
 });
 
@@ -389,11 +492,34 @@ app.post("/send-wa", async (req, res) => {
   res.json(result);
 });
 
+// v3.3: عرض المستلمين (تشخيص)
+app.get("/recipients", async (req, res) => {
+  if (!db) return res.status(500).json({ ok: false, error: "no db" });
+  try {
+    const snap = await db.ref("reports2/alertRecipients").once("value");
+    const data = snap.val() || {};
+    const list = Object.entries(data).map(([id, r]) => ({ id, ...r }));
+    const byOffice = {};
+    list.forEach(r => {
+      let offices = [];
+      if (Array.isArray(r.offices)) offices = r.offices;
+      else if (r.office) offices = [r.office];
+      offices.forEach(o => {
+        if (!o) return;
+        byOffice[o] = (byOffice[o] || 0) + 1;
+      });
+    });
+    res.json({ ok: true, total: list.length, byOffice, recipients: list });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.use((req, res) => {
   res.status(404).json({
     ok: false,
     error: `route not found: ${req.method} ${req.path}`,
-    available: ["/", "/config", "/check", "/reports", "/test-wa", "/send-wa"],
+    available: ["/", "/config", "/check", "/reports", "/test-wa", "/send-wa", "/recipients"],
   });
 });
 
@@ -401,8 +527,8 @@ setInterval(checkAlerts, 5 * 60 * 1000);
 setTimeout(checkAlerts, 5000);
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server v3.0 running on port ${PORT}`);
+  console.log(`🚀 Server v3.3 running on port ${PORT}`);
   console.log(`🌍 Timezone: Asia/Riyadh (UTC+3)`);
-  console.log(`🔑 Smart key: status from latest stage attempt`);
+  console.log(`📱 Per-office alert recipients enabled`);
   console.log(`📞 WA_TARGET: ${WA_TARGET || "(not set)"}`);
 });
