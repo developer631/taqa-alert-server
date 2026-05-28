@@ -451,7 +451,7 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "3.6",
+    version: "3.6-diag",
     time: new Date().toISOString(),
     features: [
       "✅ Per-recipient custom alert thresholds (dynamic)",
