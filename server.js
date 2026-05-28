@@ -283,6 +283,13 @@ function formatOutageDetails(r) {
     }
   } else if (type === "station") {
     lines.push(`⚠️ انقطاع محطة كامل`);
+    // محطات إضافية (انقطاع محطات متعددة)
+    if (r.extraStations && r.extraStations.length > 0) {
+      r.extraStations.forEach((st) => {
+        const nm = typeof st === "string" ? st : (st.name || st.id);
+        lines.push(`⭐ محطة إضافية: ${nm}`);
+      });
+    }
   } else {
     if (r.feederName) lines.push(`⭐ المغذي: ${r.feederName}`);
     if (r.busNumber) lines.push(`⭐ الباص: B${r.busNumber}`);
@@ -474,7 +481,7 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "3.9-qura",
+    version: "3.9-extrast",
     time: new Date().toISOString(),
     features: [
       "✅ Per-recipient custom alert thresholds (dynamic)",
