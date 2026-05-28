@@ -1,5 +1,6 @@
 // ═══════════════════════════════════════════════════════════
-// طاقة (TAQA) - Alert Server  v3.7
+// طاقة (TAQA) - Alert Server  v3.8
+// + استعادة كلمة المرور عبر واتساب
 // + ربط المرسلين (QR + رمز اقتران Pairing Code)
 // + عتبات لكل مستلم + مستلمين متعددين
 // + المفتاح الذكي + القاطع + تطبيع أسماء المكاتب
@@ -452,7 +453,7 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "3.7-pair2",
+    version: "3.8-reset",
     time: new Date().toISOString(),
     features: [
       "✅ Per-recipient custom alert thresholds (dynamic)",
@@ -647,6 +648,99 @@ app.get("/wawp/diag-qr", async (req, res) => {
     }
   }
   res.json({ ok: true, instanceId, results });
+});
+
+// تشخيص: جرّب الإرسال من instance معيّن واكشف الرد
+// /wawp/diag-send?instanceId=XXXX&phone=966XXX
+app.get("/wawp/diag-send", async (req, res) => {
+  const instanceId = req.query.instanceId;
+  const phone = (req.query.phone || WA_TARGET || "").replace(/[\s\-\+]/g, "");
+  if (!instanceId || !phone) return res.status(400).json({ ok: false, error: "أضف ?instanceId=XXXX&phone=966XXX" });
+
+  // 1. افحص حالة الـ instance أول
+  let statusInfo = {};
+  try {
+    const sr = await fetch(`https://api.wawp.net/v2/session/info?instance_id=${instanceId}&access_token=${WAWP_TOKEN}`, {
+      method: "GET", headers: { "Authorization": "Bearer " + WAWP_TOKEN },
+    });
+    const st = await sr.text();
+    try { statusInfo = JSON.parse(st); } catch { statusInfo = { raw: st.substring(0, 200) }; }
+  } catch (e) { statusInfo = { error: e.message }; }
+
+  // 2. جرّب الإرسال بصيغتين (message / text)
+  const chatId = phone + "@c.us";
+  const sends = {};
+  const variants = [
+    { name: "body message", body: { instance_id: instanceId, access_token: WAWP_TOKEN, chatId, message: "🧪 اختبار TAQA" } },
+    { name: "body text", body: { instance_id: instanceId, access_token: WAWP_TOKEN, chatId, text: "🧪 اختبار TAQA" } },
+    { name: "query+text", url: `https://api.wawp.net/v2/send/text?instance_id=${instanceId}&access_token=${WAWP_TOKEN}`, body: { chatId, text: "🧪 اختبار TAQA" } },
+  ];
+  for (const v of variants) {
+    try {
+      const r = await fetch(v.url || "https://api.wawp.net/v2/send/text", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + WAWP_TOKEN },
+        body: JSON.stringify(v.body),
+      });
+      const t = await r.text();
+      let d; try { d = JSON.parse(t); } catch { d = { raw: t.substring(0, 200) }; }
+      sends[v.name] = { status: r.status, data: d };
+    } catch (e) {
+      sends[v.name] = { error: e.message };
+    }
+  }
+  res.json({ ok: true, instanceId, phone, sessionStatus: statusInfo.status || statusInfo, sends });
+});
+
+// ═══ استعادة كلمة المرور عبر واتساب ═══
+// محاولات الاسترداد (حماية بسيطة من الإساءة)
+const resetAttempts = {}; // { badge: { count, firstAt } }
+
+app.post("/auth/reset-password", async (req, res) => {
+  const badge = String((req.body && req.body.badge) || "").trim();
+  const phone = String((req.body && req.body.phone) || "").replace(/[\s\-\+]/g, "").replace(/^00/, "");
+  if (!badge || !phone) return res.status(400).json({ ok: false, error: "الرقم الوظيفي ورقم الجوال مطلوبان" });
+
+  // حماية: حد 3 محاولات لكل رقم وظيفي في الساعة
+  const now = Date.now();
+  const rec = resetAttempts[badge];
+  if (rec && now - rec.firstAt < 3600000) {
+    if (rec.count >= 3) {
+      return res.status(429).json({ ok: false, error: "محاولات كثيرة. حاول بعد ساعة." });
+    }
+    rec.count++;
+  } else {
+    resetAttempts[badge] = { count: 1, firstAt: now };
+  }
+
+  try {
+    // 1. تأكد إن الحساب موجود
+    const email = badge + "@taqa.sec";
+    let userRecord;
+    try {
+      userRecord = await admin.auth().getUserByEmail(email);
+    } catch (e) {
+      return res.status(404).json({ ok: false, error: "الرقم الوظيفي غير مسجّل" });
+    }
+
+    // 2. ولّد كلمة مرور مؤقتة (8 أحرف/أرقام)
+    const tempPass = Math.random().toString(36).slice(-4).toUpperCase() + Math.floor(1000 + Math.random() * 9000);
+
+    // 3. عيّنها للحساب
+    await admin.auth().updateUser(userRecord.uid, { password: tempPass });
+
+    // 4. أرسلها واتساب من الرقم الرئيسي لجوال الموظف
+    const msg = `🔑 *استعادة كلمة المرور - TAQA*\n\nكلمة المرور المؤقتة:\n*${tempPass}*\n\nادخل فيها وغيّرها من حسابك فوراً.\n\nإذا لم تطلب هذا، تجاهل الرسالة.`;
+    const sendResult = await sendWA(phone, msg); // من الرقم الرئيسي (بدون customInstance)
+
+    if (!sendResult.ok) {
+      return res.status(502).json({ ok: false, error: "فشل إرسال الواتساب. تأكد من الرقم." });
+    }
+
+    res.json({ ok: true, message: "تم إرسال كلمة مرور مؤقتة لواتسابك" });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
 });
 
 // طلب رمز اقتران (Pairing Code) - بديل QR
