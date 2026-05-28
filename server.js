@@ -1,5 +1,6 @@
 // ═══════════════════════════════════════════════════════════
-// طاقة (TAQA) - Alert Server  v3.8
+// طاقة (TAQA) - Alert Server  v3.9
+// + احتياطي تلقائي للرقم الرئيسي لو فشل رقم المرسِل
 // + استعادة كلمة المرور عبر واتساب (صيغة OTP)
 // + ربط المرسلين (QR + رمز اقتران Pairing Code)
 // + عتبات لكل مستلم + مستلمين متعددين
@@ -106,30 +107,46 @@ async function sendWA(phone, message, customInstance) {
   if (!phone) return { ok: false, error: "no phone" };
   const cleanPhone = String(phone).replace(/[\s\-\+]/g, "").replace(/^00/, "").replace(/@c\.us$/, "");
   const chatId = cleanPhone + "@c.us";
-  // v3.6: استخدم instance مخصص لو متوفر، وإلا الرئيسي
-  const instanceId = (customInstance && customInstance.instanceId) || WAWP_INSTANCE;
-  const token = (customInstance && customInstance.token) || WAWP_TOKEN;
-  try {
+
+  // دالة داخلية للإرسال من instance معيّن
+  async function trySend(instanceId, token) {
     const res = await fetch("https://api.wawp.net/v2/send/text", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        instance_id: instanceId,
-        access_token: token,
-        chatId: chatId,
-        message: message,
-      }),
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+      body: JSON.stringify({ instance_id: instanceId, access_token: token, chatId, message }),
     });
     const text = await res.text();
-    let data;
-    try { data = JSON.parse(text); } catch { data = { raw: text.substring(0, 300) }; }
-    console.log(`📤 WA → ${chatId}: ${res.status} [instance: ${instanceId}]`);
-    return { ok: res.ok, status: res.status, data };
+    let data; try { data = JSON.parse(text); } catch { data = { raw: text.substring(0, 300) }; }
+    return { ok: res.ok, status: res.status, data, instanceId };
+  }
+
+  // 1. جرّب instance المخصص (رقم المرسِل) لو موجود
+  const customId = customInstance && customInstance.instanceId;
+  const customToken = (customInstance && customInstance.token) || WAWP_TOKEN;
+  try {
+    if (customId) {
+      const r = await trySend(customId, customToken);
+      console.log(`📤 WA → ${chatId}: ${r.status} [instance: ${customId}]`);
+      if (r.ok) return r;
+      // فشل instance المرسِل → نرجع للرئيسي
+      console.warn(`⚠️ custom instance ${customId} failed (${r.status}), falling back to MAIN`);
+    }
+    // 2. الرقم الرئيسي (احتياطي أو افتراضي)
+    const main = await trySend(WAWP_INSTANCE, WAWP_TOKEN);
+    console.log(`📤 WA → ${chatId}: ${main.status} [instance: MAIN ${WAWP_INSTANCE}]`);
+    return main;
   } catch (e) {
     console.error("❌ WA error:", e.message);
+    // محاولة أخيرة من الرئيسي لو الخطأ كان من المخصص
+    if (customId) {
+      try {
+        const main = await trySend(WAWP_INSTANCE, WAWP_TOKEN);
+        console.log(`📤 WA → ${chatId}: ${main.status} [instance: MAIN fallback]`);
+        return main;
+      } catch (e2) {
+        return { ok: false, error: e2.message };
+      }
+    }
     return { ok: false, error: e.message };
   }
 }
@@ -453,7 +470,7 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "3.8-otp3",
+    version: "3.9-fallback",
     time: new Date().toISOString(),
     features: [
       "✅ Per-recipient custom alert thresholds (dynamic)",
