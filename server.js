@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════
 // طاقة (TAQA) - Alert Server  v3.8
-// + استعادة كلمة المرور عبر واتساب
+// + استعادة كلمة المرور عبر واتساب (صيغة OTP)
 // + ربط المرسلين (QR + رمز اقتران Pairing Code)
 // + عتبات لكل مستلم + مستلمين متعددين
 // + المفتاح الذكي + القاطع + تطبيع أسماء المكاتب
@@ -453,7 +453,7 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "3.8-reset",
+    version: "3.8-otp",
     time: new Date().toISOString(),
     features: [
       "✅ Per-recipient custom alert thresholds (dynamic)",
@@ -730,7 +730,7 @@ app.post("/auth/reset-password", async (req, res) => {
     await admin.auth().updateUser(userRecord.uid, { password: tempPass });
 
     // 4. أرسلها واتساب من الرقم الرئيسي لجوال الموظف
-    const msg = `🔑 *استعادة كلمة المرور - TAQA*\n\nكلمة المرور المؤقتة:\n*${tempPass}*\n\nادخل فيها وغيّرها من حسابك فوراً.\n\nإذا لم تطلب هذا، تجاهل الرسالة.`;
+    const msg = `TAQA code: ${tempPass}\n\n🔑 كلمة المرور المؤقتة لاستعادة حسابك في TAQA.\nادخل فيها وغيّرها من حسابك فوراً.\n\nإذا لم تطلب هذا، تجاهل الرسالة.`;
     const sendResult = await sendWA(phone, msg); // من الرقم الرئيسي (بدون customInstance)
 
     if (!sendResult.ok) {
