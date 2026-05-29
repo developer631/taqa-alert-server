@@ -1,10 +1,13 @@
 // ═══════════════════════════════════════════════════════════
-// طاقة (TAQA) - Alert Server  v3.9
+// طاقة (TAQA) - Alert Server  v3.9-extrast (آخر إصدار)
+// + المحطات الإضافية في رسالة التنبيه
 // + احتياطي تلقائي للرقم الرئيسي لو فشل رقم المرسِل
 // + استعادة كلمة المرور عبر واتساب (صيغة OTP)
 // + ربط المرسلين (QR + رمز اقتران Pairing Code)
 // + عتبات لكل مستلم + مستلمين متعددين
 // + المفتاح الذكي + القاطع + تطبيع أسماء المكاتب
+// + توافق "مكتب القرى" / "منيزلة" / "شرق الأحساء"
+// + توحيد أيقونات رسائل التنبيه (⭐)
 // ═══════════════════════════════════════════════════════════
 
 const express = require("express");
@@ -259,6 +262,8 @@ function extractReport(id, raw, source) {
     stages: stages,
     // v3.6: instance المرسِل (لإرسال التنبيهات من رقمه)
     senderWawp: data.senderWawp || raw.senderWawp || null,
+    // v3.9-fix: المحطات الإضافية (انقطاع محطات متعددة) — تظهر في رسالة التنبيه
+    extraStations: data.extraStations || raw.extraStations || [],
   };
 }
 
@@ -445,6 +450,11 @@ async function checkAlerts() {
       const cleanTarget = String(WA_TARGET).replace(/[\s\-\+]/g, "").replace(/^00/, "");
       for (const recip of officeRecipients) {
         const cleanRecip = String(recip.phone).replace(/[\s\-\+]/g, "").replace(/^00/, "");
+        // v3.9-fix: تخطّى المستلم لو رقمه = الرقم الرئيسي (يكون اتنبّه أصلاً كـ MAIN)
+        if (WA_TARGET && cleanRecip === cleanTarget) {
+          console.log(`   ⏭️ skip ${recip.name} (${recip.phone}) — same as WA_TARGET`);
+          continue;
+        }
         // فحص كل عتبة للمستلم
         for (const t of [...recip.thresholds].sort((a, b) => a - b)) {
           const key = `${r.id}_${recip.id}_${t}`;
@@ -902,7 +912,7 @@ setInterval(checkAlerts, 5 * 60 * 1000);
 setTimeout(checkAlerts, 5000);
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server v3.6 running on port ${PORT}`);
+  console.log(`🚀 Server v3.9-extrast running on port ${PORT}`);
   console.log(`🌍 Timezone: Asia/Riyadh (UTC+3)`);
   console.log(`📱 Per-recipient custom alert thresholds`);
   console.log(`📞 WA_TARGET: ${WA_TARGET || "(not set)"}`);
