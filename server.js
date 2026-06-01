@@ -274,7 +274,7 @@ function formatOutageDetails(r) {
 
   if (type === "feeder" && r.feederName) {
     lines.push(`⭐ المغذي: ${r.feederName}`);
-    if (r.busNumber) lines.push(`⭐ الباص: B${r.busNumber}`);
+    // لا نعرض الباص لنوع المغذي — المغذي يحدّد الموقع بدقة
   } else if (type === "bus") {
     if (r.busNumbers && r.busNumbers.length > 0) {
       const list = r.busNumbers.includes("all")
@@ -297,7 +297,7 @@ function formatOutageDetails(r) {
     }
   } else {
     if (r.feederName) lines.push(`⭐ المغذي: ${r.feederName}`);
-    if (r.busNumber) lines.push(`⭐ الباص: B${r.busNumber}`);
+    if (!r.feederName && r.busNumber) lines.push(`⭐ الباص: B${r.busNumber}`);
   }
 
   // v3.1: المفاتيح الذكية (للمغذي)
