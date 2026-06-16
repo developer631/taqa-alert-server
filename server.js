@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// طاقة (TAQA) - Alert Server  v4.1-pause (آخر إصدار)
+// طاقة (TAQA) - Alert Server  v4.3-cleanup (آخر إصدار)
 // + المحطات الإضافية في رسالة التنبيه
 // + احتياطي تلقائي للرقم الرئيسي لو فشل رقم المرسِل
 // + استعادة كلمة المرور عبر واتساب (صيغة OTP)
@@ -503,7 +503,7 @@ app.get("/", (req, res) => {
       "✅ Breaker (SCADA) status: no-response / local",
       "✅ Asia/Riyadh timezone",
     ],
-    endpoints: ["GET /", "GET /config", "GET /check", "GET /reports", "GET /test-wa", "POST /send-wa", "GET /recipients"],
+    endpoints: ["GET /", "GET /config", "GET /check", "GET /reports", "GET /test-wa", "POST /send-wa", "GET /recipients", "POST /admin/set-password", "POST /admin/delete-user", "POST /admin/cleanup-orphans"],
   });
 });
 
@@ -784,6 +784,104 @@ app.post("/auth/reset-password", async (req, res) => {
   }
 });
 
+// ═══ تغيير باسورد موظف من لوحة الإدارة (Admin SDK — يعمل لكل الحسابات بدون الباسورد القديم) ═══
+// يتحقّق من توكن المُرسِل وأنه مدير قبل التنفيذ
+const ADMIN_BADGES_SRV = ["77996"];
+app.post("/admin/set-password", async (req, res) => {
+  const idToken = String((req.body && req.body.idToken) || "");
+  const targetBadge = String((req.body && req.body.targetBadge) || "").trim();
+  const newPassword = String((req.body && req.body.newPassword) || "");
+  if (!idToken || !targetBadge || !newPassword) return res.status(400).json({ ok: false, error: "بيانات ناقصة" });
+  if (newPassword.length < 6) return res.status(400).json({ ok: false, error: "الباسورد 6 خانات على الأقل" });
+  try {
+    // 1. تحقّق أن المُرسِل مدير
+    let decoded;
+    try { decoded = await admin.auth().verifyIdToken(idToken); }
+    catch (e) { return res.status(401).json({ ok: false, error: "جلسة غير صالحة" }); }
+    const callerBadge = String(decoded.email || "").split("@")[0];
+    let callerRole = null;
+    try { callerRole = (await db.ref("users/" + decoded.uid + "/role").once("value")).val(); } catch (_) {}
+    const isAdmin = callerRole === "admin" || ADMIN_BADGES_SRV.includes(callerBadge);
+    if (!isAdmin) return res.status(403).json({ ok: false, error: "غير مصرّح — للمدير فقط" });
+    // 2. جد حساب الهدف
+    const email = targetBadge + "@taqa.sec";
+    let userRecord;
+    try { userRecord = await admin.auth().getUserByEmail(email); }
+    catch (e) { return res.status(404).json({ ok: false, error: "الرقم الوظيفي غير مسجّل" }); }
+    // 3. غيّر الباسورد
+    await admin.auth().updateUser(userRecord.uid, { password: newPassword });
+    // 4. خزّن الباسورد الجديد في السجل
+    try { await db.ref("users/" + userRecord.uid + "/pw").set(newPassword); } catch (_) {}
+    try { await db.ref("users/" + userRecord.uid + "/pwChanged").set(true); } catch (_) {}
+    res.json({ ok: true, uid: userRecord.uid });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ═══ حذف موظف نهائياً من لوحة الإدارة (Admin SDK — يحذف حساب الدخول + السجل) ═══
+app.post("/admin/delete-user", async (req, res) => {
+  const idToken = String((req.body && req.body.idToken) || "");
+  const targetBadge = String((req.body && req.body.targetBadge) || "").trim();
+  if (!idToken || !targetBadge) return res.status(400).json({ ok: false, error: "بيانات ناقصة" });
+  try {
+    let decoded;
+    try { decoded = await admin.auth().verifyIdToken(idToken); }
+    catch (e) { return res.status(401).json({ ok: false, error: "جلسة غير صالحة" }); }
+    const callerBadge = String(decoded.email || "").split("@")[0];
+    let callerRole = null;
+    try { callerRole = (await db.ref("users/" + decoded.uid + "/role").once("value")).val(); } catch (_) {}
+    const isAdmin = callerRole === "admin" || ADMIN_BADGES_SRV.includes(callerBadge);
+    if (!isAdmin) return res.status(403).json({ ok: false, error: "غير مصرّح — للمدير فقط" });
+    if (ADMIN_BADGES_SRV.includes(targetBadge)) return res.status(400).json({ ok: false, error: "لا يمكن حذف المدير الدائم" });
+    const email = targetBadge + "@taqa.sec";
+    let userRecord;
+    try { userRecord = await admin.auth().getUserByEmail(email); }
+    catch (e) { return res.json({ ok: true, authDeleted: false, note: "no auth account" }); }
+    if (userRecord.uid === decoded.uid) return res.status(400).json({ ok: false, error: "لا يمكن حذف حسابك" });
+    await admin.auth().deleteUser(userRecord.uid);
+    try { await db.ref("users/" + userRecord.uid).remove(); } catch (_) {}
+    res.json({ ok: true, authDeleted: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ═══ تنظيف الحسابات اليتيمة: حسابات Auth بدون سجل في القائمة (users) ═══
+app.post("/admin/cleanup-orphans", async (req, res) => {
+  const idToken = String((req.body && req.body.idToken) || "");
+  if (!idToken) return res.status(400).json({ ok: false, error: "بيانات ناقصة" });
+  try {
+    let decoded;
+    try { decoded = await admin.auth().verifyIdToken(idToken); }
+    catch (e) { return res.status(401).json({ ok: false, error: "جلسة غير صالحة" }); }
+    const callerBadge = String(decoded.email || "").split("@")[0];
+    let callerRole = null;
+    try { callerRole = (await db.ref("users/" + decoded.uid + "/role").once("value")).val(); } catch (_) {}
+    if (!(callerRole === "admin" || ADMIN_BADGES_SRV.includes(callerBadge))) return res.status(403).json({ ok: false, error: "غير مصرّح — للمدير فقط" });
+    // اجمع الموجودين في القائمة (uid + badge)
+    const usersSnap = await db.ref("users").once("value");
+    const dbUsers = usersSnap.val() || {};
+    const dbUids = new Set(Object.keys(dbUsers));
+    const dbBadges = new Set(Object.values(dbUsers).map(u => String(u.badgeNum || "")));
+    // مرّ على كل حسابات Auth واحذف اللي ما له سجل
+    let deleted = [], kept = 0, nextToken;
+    do {
+      const list = await admin.auth().listUsers(1000, nextToken);
+      for (const u of list.users) {
+        const badge = String(u.email || "").split("@")[0];
+        // أبقِ: المدير الدائم، حساب المُرسِل، أو أي حساب موجود في القائمة (بالـuid أو الرقم)
+        if (ADMIN_BADGES_SRV.includes(badge) || u.uid === decoded.uid || dbUids.has(u.uid) || dbBadges.has(badge)) { kept++; continue; }
+        try { await admin.auth().deleteUser(u.uid); deleted.push(badge); } catch (_) {}
+      }
+      nextToken = list.pageToken;
+    } while (nextToken);
+    res.json({ ok: true, deletedCount: deleted.length, deleted, keptCount: kept });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // طلب رمز اقتران (Pairing Code) - بديل QR
 app.post("/wawp/request-code", async (req, res) => {
   const { instanceId, phone } = req.body || {};
@@ -974,7 +1072,7 @@ setInterval(async () => {
 }, 86400000);
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server v4.1-pause running on port ${PORT}`);
+  console.log(`🚀 Server v4.3-cleanup running on port ${PORT}`);
   console.log(`🌍 Timezone: Asia/Riyadh (UTC+3)`);
   console.log(`📱 Per-recipient custom alert thresholds`);
   console.log(`📞 WA_TARGET: ${WA_TARGET || "(not set)"}`);
