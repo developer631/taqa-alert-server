@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// طاقة (TAQA) - Alert Server  v3.9-extrast (آخر إصدار)
+// طاقة (TAQA) - Alert Server  v4.0-recurrence (آخر إصدار)
 // + المحطات الإضافية في رسالة التنبيه
 // + احتياطي تلقائي للرقم الرئيسي لو فشل رقم المرسِل
 // + استعادة كلمة المرور عبر واتساب (صيغة OTP)
@@ -8,6 +8,7 @@
 // + المفتاح الذكي + القاطع + تطبيع أسماء المكاتب
 // + توافق "مكتب القرى" / "منيزلة" / "شرق الأحساء"
 // + توحيد أيقونات رسائل التنبيه (⭐)
+// + تنبيه تكرار المغذي الفوري + زر اختبار الواتساب (v4.0)
 // ═══════════════════════════════════════════════════════════
 
 const express = require("express");
@@ -911,8 +912,67 @@ app.use((req, res) => {
 setInterval(checkAlerts, 5 * 60 * 1000);
 setTimeout(checkAlerts, 5000);
 
+// ═══════════════════════════════════════════════════════════
+// تنبيهات تكرار المغذي (فوري) — v9
+// التطبيق يكتب في reports2/recurrenceAlerts، والسيرفر يرسلها
+// واتساب لأرقام مستلمي المكتب (phones) من رقم المرسِل أو الرئيسي.
+// ═══════════════════════════════════════════════════════════
+function watchRecurrenceAlerts() {
+  if (!db) { console.error("❌ recurrence watcher: no DB"); return; }
+  // نراقب آخر 50 سجل فقط — السجلات المُرسلة (sent:true) تُتجاهل
+  db.ref("reports2/recurrenceAlerts").limitToLast(50).on("child_added", async (snap) => {
+    const alert = snap.val();
+    if (!alert || alert.sent) return; // أُرسل سابقاً أو فارغ
+
+    try {
+      const phones = Array.isArray(alert.phones) ? alert.phones : [];
+      if (!phones.length) {
+        await snap.ref.update({ sent: true, sentCount: 0, note: "no phones" });
+        return;
+      }
+      let okCount = 0;
+      for (const phone of phones) {
+        try {
+          const r = await sendWA(phone, alert.message, alert.senderWawp || null);
+          if (r && r.ok) okCount++;
+          await new Promise((res) => setTimeout(res, 800)); // فاصل بين الرسائل
+        } catch (e) {
+          console.error(`❌ recurrence WA → ${phone}:`, e.message);
+        }
+      }
+      await snap.ref.update({ sent: true, sentAt: Date.now(), sentCount: okCount });
+      const tag = alert.type === "test" ? "🔔 اختبار" : "🔁 تكرار";
+      console.log(`${tag} ${alert.feederName || ""} (${alert.office || ""}) → ${okCount}/${phones.length}`);
+    } catch (e) {
+      console.error("❌ recurrence alert failed:", e.message);
+      // علّمه "تم" مع خطأ حتى لا يتكرر بلا نهاية
+      try { await snap.ref.update({ sent: true, error: String(e.message || e) }); } catch (_) {}
+    }
+  });
+  console.log("✅ Recurrence alerts watcher started");
+}
+watchRecurrenceAlerts();
+
+// (اختياري) تنظيف يومي للتنبيهات المُرسلة الأقدم من 30 يوم
+setInterval(async () => {
+  if (!db) return;
+  try {
+    const cutoff = Date.now() - 30 * 86400000;
+    const snap = await db.ref("reports2/recurrenceAlerts").once("value");
+    const all = snap.val() || {};
+    const updates = {};
+    for (const [k, v] of Object.entries(all)) {
+      if (v && v.sent && v.createdAt && v.createdAt < cutoff) updates[k] = null;
+    }
+    if (Object.keys(updates).length) {
+      await db.ref("reports2/recurrenceAlerts").update(updates);
+      console.log(`🧹 cleaned ${Object.keys(updates).length} old recurrence alerts`);
+    }
+  } catch (e) { console.error("cleanup error:", e.message); }
+}, 86400000);
+
 app.listen(PORT, () => {
-  console.log(`🚀 Server v3.9-extrast running on port ${PORT}`);
+  console.log(`🚀 Server v4.0-recurrence running on port ${PORT}`);
   console.log(`🌍 Timezone: Asia/Riyadh (UTC+3)`);
   console.log(`📱 Per-recipient custom alert thresholds`);
   console.log(`📞 WA_TARGET: ${WA_TARGET || "(not set)"}`);
