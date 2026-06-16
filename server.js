@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// طاقة (TAQA) - Alert Server  v4.0-recurrence (آخر إصدار)
+// طاقة (TAQA) - Alert Server  v4.1-pause (آخر إصدار)
 // + المحطات الإضافية في رسالة التنبيه
 // + احتياطي تلقائي للرقم الرئيسي لو فشل رقم المرسِل
 // + استعادة كلمة المرور عبر واتساب (صيغة OTP)
@@ -9,6 +9,7 @@
 // + توافق "مكتب القرى" / "منيزلة" / "شرق الأحساء"
 // + توحيد أيقونات رسائل التنبيه (⭐)
 // + تنبيه تكرار المغذي الفوري + زر اختبار الواتساب (v4.0)
+// + إيقاف/تشغيل تنبيه المستلم للإجازات — تخطّي paused (v4.1)
 // ═══════════════════════════════════════════════════════════
 
 const express = require("express");
@@ -353,6 +354,7 @@ async function checkAlerts() {
     const recipientsByOffice = {};
     Object.entries(recipientsData).forEach(([recipId, r]) => {
       if (!r.phone) return;
+      if (r.paused) return; // إجازة — لا تُرسل له تنبيهات
       let offices = [];
       if (Array.isArray(r.offices)) offices = r.offices;
       else if (r.office) offices = [r.office];
@@ -972,7 +974,7 @@ setInterval(async () => {
 }, 86400000);
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server v4.0-recurrence running on port ${PORT}`);
+  console.log(`🚀 Server v4.1-pause running on port ${PORT}`);
   console.log(`🌍 Timezone: Asia/Riyadh (UTC+3)`);
   console.log(`📱 Per-recipient custom alert thresholds`);
   console.log(`📞 WA_TARGET: ${WA_TARGET || "(not set)"}`);
