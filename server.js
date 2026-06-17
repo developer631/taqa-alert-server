@@ -406,12 +406,6 @@ async function checkAlerts() {
         }
       }
 
-      // تحذير القاطع
-      let breakerWarning = "";
-      if (r.breakerStatus === "scada_no_response") {
-        breakerWarning = `\n🔧 *تنبيه: القاطع لا يستجيب — يستلزم فني محطات*\n`;
-      }
-
       // دالة بناء نص الرسالة لعتبة معينة
       const buildMsg = (threshold) => {
         const emoji = threshold >= 120 ? "🚨" : "⚠️";
@@ -425,7 +419,6 @@ async function checkAlerts() {
           (r.sensitive ? `⭐ مشتركون حساسون: ${r.sensitive}\n` : "") +
           (r.reason ? `⭐ السبب: ${r.reason}\n` : "") +
           smartKeyWarning +
-          breakerWarning +
           `\n⚠️ البلاغ تجاوز ${formatDuration(threshold)} ولم يُكتمل بعد`;
       };
 
