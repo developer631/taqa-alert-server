@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// طاقة (TAQA) - Alert Server  v4.3-cleanup (آخر إصدار)
+// طاقة (TAQA) - Alert Server  v4.4-webpush (آخر إصدار)
 // + المحطات الإضافية في رسالة التنبيه
 // + احتياطي تلقائي للرقم الرئيسي لو فشل رقم المرسِل
 // + استعادة كلمة المرور عبر واتساب (صيغة OTP)
@@ -997,8 +997,20 @@ app.post("/wawp/test", async (req, res) => {
 
 // اختبار يدوي للإشعارات: GET /push-test?msg=تجربة  (يجب أن يكون قبل معالج 404)
 app.get("/push-test", async (req, res) => {
-  await sendWebPushAll({ title: "🔔 اختبار", body: String(req.query.msg || "تجربة"), tag: "test-" + Date.now() });
-  res.json({ ok: true, sent: req.query.msg || "تجربة" });
+  let subs = {};
+  try { subs = (await db.ref("reports2/pushSubs").once("value")).val() || {}; }
+  catch (e) { return res.json({ ok: false, err: "read-failed", msg: e.message }); }
+  const keys = Object.keys(subs);
+  const body = JSON.stringify({ title: "🔔 اختبار", body: String(req.query.msg || "تجربة"), tag: "test-" + Date.now() });
+  const results = [];
+  for (const k of keys) {
+    const sub = subs[k] && subs[k].subscription;
+    const info = { badge: (subs[k] && subs[k].badge) || "?", ua: String((subs[k] && subs[k].ua) || "").slice(0, 35) };
+    if (!sub || !sub.endpoint) { results.push({ ...info, status: "no-endpoint" }); continue; }
+    try { await webpush.sendNotification(sub, body, { TTL: 3600, urgency: "high" }); results.push({ ...info, status: "SENT-OK" }); }
+    catch (err) { results.push({ ...info, status: "FAIL", code: (err && err.statusCode) || 0, msg: String((err && err.message) || "").slice(0, 90) }); }
+  }
+  res.json({ ok: true, subscribedDevices: keys.length, results });
 });
 
 app.use((req, res) => {
@@ -1159,7 +1171,7 @@ function startWebPush() {
 }
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server v4.3-cleanup running on port ${PORT}`);
+  console.log(`🚀 Server v4.4-webpush running on port ${PORT}`);
   console.log(`🌍 Timezone: Asia/Riyadh (UTC+3)`);
   console.log(`📱 Per-recipient custom alert thresholds`);
   console.log(`📞 WA_TARGET: ${WA_TARGET || "(not set)"}`);
