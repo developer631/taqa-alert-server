@@ -1064,9 +1064,103 @@ setInterval(async () => {
   } catch (e) { console.error("cleanup error:", e.message); }
 }, 86400000);
 
+// ═══════════════════════════════════════════════════════════
+// Web Push (مدمج) — إشعارات الجوال تصل حتى والتطبيق مقفل تماماً
+//   ⚡ انقطاع جديد   → إشعار فوري لكل الأجهزة المشتركة
+//   ⏰ تجاوز عتبة (60/120/240 دقيقة) → إشعار لمرة واحدة لكل عتبة
+// إضافي تماماً — لا يمس منطق الواتساب/OneSignal إطلاقاً
+// متغيرات بيئة جديدة مطلوبة: VAPID_PUBLIC , VAPID_PRIVATE
+// ═══════════════════════════════════════════════════════════
+const webpush = require("web-push");
+const VAPID_PUBLIC  = process.env.VAPID_PUBLIC  || "BIA6qd_IldK-6x6vAY8ci8s1OVz76_v6HcKuNAgK3b0jYSaefYCdj2deLMSD4Zp2_K0EdH0-Us9OoynJRQFDXdg";
+const VAPID_PRIVATE = process.env.VAPID_PRIVATE || "oYMiJqyI0mJzzNPpc_YqxcmZ6KpYEODkBAw-vSJu9fE";
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || "mailto:admin@taqa.sec";
+const PUSH_THRESHOLDS = (process.env.PUSH_THRESHOLDS || "60,120,240")
+  .split(",").map(n => parseInt(n.trim(), 10)).filter(n => n > 0).sort((a, b) => a - b);
+try {
+  webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC, VAPID_PRIVATE);
+  console.log("✅ Web Push (VAPID) configured");
+} catch (e) { console.error("❌ VAPID error:", e.message); }
+
+async function sendWebPushAll(payload) {
+  if (!db) return;
+  let subs = {};
+  try { subs = (await db.ref("reports2/pushSubs").once("value")).val() || {}; }
+  catch (e) { console.error("WebPush read subs:", e.message); return; }
+  const keys = Object.keys(subs);
+  if (!keys.length) { console.log("ℹ️ WebPush: لا يوجد مشتركون"); return; }
+  const body = JSON.stringify(payload);
+  let ok = 0, dead = 0;
+  await Promise.all(keys.map(async (key) => {
+    const sub = subs[key] && subs[key].subscription;
+    if (!sub || !sub.endpoint) return;
+    try { await webpush.sendNotification(sub, body, { TTL: 3600, urgency: "high" }); ok++; }
+    catch (err) {
+      const c = err && err.statusCode;
+      if (c === 404 || c === 410) { dead++; try { await db.ref("reports2/pushSubs/" + key).remove(); } catch (e) {} }
+      else console.error(`WebPush err [${key}]:`, c || (err && err.message));
+    }
+  }));
+  console.log(`📤 WebPush: ${payload.title} → ${ok} جهاز${dead ? ` (حذف ${dead} ميت)` : ""}`);
+}
+function isOpenOutage(r) { return r && r.allRestored !== true && r.status !== "restored"; }
+function pushNewOutage(id, r) {
+  const parts = [r.feederName, r.stationName, r.office].filter(Boolean).join(" · ");
+  const extra = (r.totalAffected != null) ? `\n👥 ${r.totalAffected} مشترك` : "";
+  return sendWebPushAll({ title: "⚡ انقطاع جديد", body: parts + extra, tag: "outage-" + id });
+}
+function pushThreshold(id, r, th, el) {
+  const parts = [r.feederName, r.office].filter(Boolean).join(" · ");
+  return sendWebPushAll({ title: `⏰ تجاوز عتبة ${th} دقيقة`, body: parts + `\nمضى ${el} دقيقة بدون إعادة كاملة`, tag: `thr-${id}-${th}` });
+}
+
+const _wpOutages = {}, _wpSeen = new Set(), _wpThrSeen = new Set();
+let _wpReady = false;
+function startWebPush() {
+  if (!db) { console.error("WebPush: Firebase غير متصل"); return; }
+  const ref = db.ref("reports2/outages");
+  ref.once("value").then((snap) => {
+    const init = snap.val() || {};
+    Object.keys(init).forEach((id) => {
+      _wpOutages[id] = init[id]; _wpSeen.add(id);
+      if (isOpenOutage(init[id])) {
+        const el = calcOutageMinutes(init[id].outageTime, init[id].createdAt);
+        PUSH_THRESHOLDS.forEach((th) => { if (el >= th) _wpThrSeen.add(id + ":" + th); });
+      }
+    });
+    _wpReady = true;
+    console.log(`✅ WebPush مراقبة بدأت | ${Object.keys(init).length} بلاغ | عتبات ${PUSH_THRESHOLDS.join("/")} دقيقة`);
+    ref.on("child_added", (s) => {
+      _wpOutages[s.key] = s.val();
+      if (_wpReady && !_wpSeen.has(s.key)) { _wpSeen.add(s.key); pushNewOutage(s.key, s.val()); }
+    });
+    ref.on("child_changed", (s) => { _wpOutages[s.key] = s.val(); });
+    ref.on("child_removed", (s) => { delete _wpOutages[s.key]; });
+  }).catch((e) => console.error("WebPush baseline error:", e.message));
+  setInterval(() => {
+    if (!_wpReady) return;
+    Object.keys(_wpOutages).forEach((id) => {
+      const r = _wpOutages[id];
+      if (!isOpenOutage(r)) return;
+      const el = calcOutageMinutes(r.outageTime, r.createdAt);
+      PUSH_THRESHOLDS.forEach((th) => {
+        const k = id + ":" + th;
+        if (el >= th && !_wpThrSeen.has(k)) { _wpThrSeen.add(k); pushThreshold(id, r, th, el); }
+      });
+    });
+  }, 60000);
+}
+
+// اختبار يدوي للإشعارات: GET /push-test?msg=تجربة
+app.get("/push-test", async (req, res) => {
+  await sendWebPushAll({ title: "🔔 اختبار", body: String(req.query.msg || "تجربة"), tag: "test-" + Date.now() });
+  res.json({ ok: true });
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 Server v4.3-cleanup running on port ${PORT}`);
   console.log(`🌍 Timezone: Asia/Riyadh (UTC+3)`);
   console.log(`📱 Per-recipient custom alert thresholds`);
   console.log(`📞 WA_TARGET: ${WA_TARGET || "(not set)"}`);
+  startWebPush();
 });
