@@ -487,7 +487,7 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "3.9-extrast",
+    version: "v4.4-webpush",
     time: new Date().toISOString(),
     features: [
       "✅ Per-recipient custom alert thresholds (dynamic)",
@@ -495,8 +495,9 @@ app.get("/", (req, res) => {
       "✅ Multiple smart keys per feeder",
       "✅ Breaker (SCADA) status: no-response / local",
       "✅ Asia/Riyadh timezone",
+      "🔔 Web Push (new outage + thresholds)",
     ],
-    endpoints: ["GET /", "GET /config", "GET /check", "GET /reports", "GET /test-wa", "POST /send-wa", "GET /recipients", "POST /admin/set-password", "POST /admin/delete-user", "POST /admin/cleanup-orphans"],
+    endpoints: ["GET /", "GET /config", "GET /check", "GET /reports", "GET /test-wa", "POST /send-wa", "GET /recipients", "POST /admin/set-password", "POST /admin/delete-user", "POST /admin/cleanup-orphans", "GET /push-test"],
   });
 });
 
