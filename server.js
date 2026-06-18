@@ -994,11 +994,17 @@ app.post("/wawp/test", async (req, res) => {
   res.json(result);
 });
 
+// اختبار يدوي للإشعارات: GET /push-test?msg=تجربة  (يجب أن يكون قبل معالج 404)
+app.get("/push-test", async (req, res) => {
+  await sendWebPushAll({ title: "🔔 اختبار", body: String(req.query.msg || "تجربة"), tag: "test-" + Date.now() });
+  res.json({ ok: true, sent: req.query.msg || "تجربة" });
+});
+
 app.use((req, res) => {
   res.status(404).json({
     ok: false,
     error: `route not found: ${req.method} ${req.path}`,
-    available: ["/", "/config", "/check", "/reports", "/test-wa", "/send-wa", "/recipients"],
+    available: ["/", "/config", "/check", "/reports", "/test-wa", "/send-wa", "/recipients", "/push-test"],
   });
 });
 
@@ -1150,12 +1156,6 @@ function startWebPush() {
     });
   }, 60000);
 }
-
-// اختبار يدوي للإشعارات: GET /push-test?msg=تجربة
-app.get("/push-test", async (req, res) => {
-  await sendWebPushAll({ title: "🔔 اختبار", body: String(req.query.msg || "تجربة"), tag: "test-" + Date.now() });
-  res.json({ ok: true });
-});
 
 app.listen(PORT, () => {
   console.log(`🚀 Server v4.3-cleanup running on port ${PORT}`);
