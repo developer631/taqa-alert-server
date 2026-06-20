@@ -411,7 +411,7 @@ async function checkAlerts() {
 
       // دالة بناء نص الرسالة لعتبة معينة
       const buildMsg = (threshold) => {
-        const emoji = threshold >= 120 ? "🚨" : "⚠️";
+        const emoji = "🔺";
         return `${emoji} *تنبيه تأخر انقطاع*\n\n` +
           `⭐ المكتب: ${r.office || "—"}\n` +
           `${outageDetails}\n` +
@@ -422,7 +422,7 @@ async function checkAlerts() {
           (r.sensitive ? `⭐ مشتركون حساسون: ${r.sensitive}\n` : "") +
           (r.reason ? `⭐ السبب: ${r.reason}\n` : "") +
           smartKeyWarning +
-          `\n⚠️ البلاغ تجاوز ${formatDuration(threshold)} ولم يُكتمل بعد`;
+          `\n🔺 البلاغ تجاوز ${formatDuration(threshold)} ولم يُكتمل بعد`;
       };
 
       // v3.6: instance المرسِل (صاحب البلاغ) - أو الرئيسي احتياطياً
@@ -434,7 +434,7 @@ async function checkAlerts() {
           if (mins < t) continue;
           const key = `${r.id}_MAIN_${t}`;
           const osKey = `${key}_os`;
-          const emoji = t >= 120 ? "🚨" : "⚠️";
+          const emoji = "🔺";
           // إشعار التطبيق (OneSignal) — مرة واحدة لكل عتبة، لا يُعاد إزعاجه
           if (!alerted[osKey]) {
             sendOSNotif(`${emoji} تجاوز ${formatDuration(t)}`,
