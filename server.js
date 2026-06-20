@@ -333,9 +333,12 @@ function formatOutageDetails(r) {
   return lines.join("\n");
 }
 
+let _checkRunning = false;
 async function checkAlerts() {
+  if (_checkRunning) { console.log("⏭️ checkAlerts شغّال بالفعل — تخطّي"); return { ok: true, skipped: true }; }
+  _checkRunning = true;
   console.log("🔍 Checking outage alerts...", new Date().toISOString());
-  if (!db) return { ok: false, error: "no db" };
+  if (!db) { _checkRunning = false; return { ok: false, error: "no db" }; }
   try {
     const [oldReportsSnap, newReportsSnap, alertedSnap, recipientsSnap] = await Promise.all([
       db.ref("reports").once("value"),
@@ -379,7 +382,7 @@ async function checkAlerts() {
     for (const [id, raw] of Object.entries(oldReports)) allReports.push(extractReport(id, raw, "reports"));
     for (const [id, raw] of Object.entries(newReports)) allReports.push(extractReport(id, raw, "reports2/outages"));
 
-    let checked = 0, alertsSent = 0, activeFound = 0;
+    let checked = 0, alertsSent = 0, activeFound = 0, sendFailed = 0, lastSendErr = null;
     for (const r of allReports) {
       checked++;
       if (r.allRestored || r.status === "closed") continue;
@@ -428,15 +431,28 @@ async function checkAlerts() {
       // ─── WA_TARGET: الرقم الرئيسي (عتبات افتراضية 80/120) ───
       if (WA_TARGET) {
         for (const t of [...ALERT_THRESHOLDS].sort((a, b) => a - b)) {
+          if (mins < t) continue;
           const key = `${r.id}_MAIN_${t}`;
-          if (mins >= t && !alerted[key]) {
-            await sendWA(WA_TARGET, buildMsg(t), senderInstance);
-            const emoji = t >= 120 ? "🚨" : "⚠️";
-            await sendOSNotif(`${emoji} تجاوز ${formatDuration(t)}`,
-              `${r.office || "-"}\nالانقطاع: ${r.outageTime} (${durationText})`, r.office);
-            newAlerted[key] = Date.now();
-            alertsSent++;
-            console.log(`📤 MAIN alert: id=${r.id} t=${t}min sender=${senderInstance ? senderInstance.phone : "main"}`);
+          const osKey = `${key}_os`;
+          const emoji = t >= 120 ? "🚨" : "⚠️";
+          // إشعار التطبيق (OneSignal) — مرة واحدة لكل عتبة، لا يُعاد إزعاجه
+          if (!alerted[osKey]) {
+            sendOSNotif(`${emoji} تجاوز ${formatDuration(t)}`,
+              `${r.office || "-"}\nالانقطاع: ${r.outageTime} (${durationText})`, r.office).catch(() => {});
+            newAlerted[osKey] = Date.now();
+          }
+          // واتساب — يُعلَّم «مُرسل» فقط عند نجاح الإرسال، وإلا يُعاد في الدورة التالية (صفر ضياع)
+          if (!alerted[key]) {
+            const waRes = await sendWA(WA_TARGET, buildMsg(t), senderInstance);
+            if (waRes && waRes.ok) {
+              newAlerted[key] = Date.now();
+              alertsSent++;
+              console.log(`📤 MAIN alert SENT: id=${r.id} t=${t}min`);
+            } else {
+              sendFailed++;
+              lastSendErr = `MAIN ${r.id}@${t}م: ${waRes ? (waRes.status || waRes.error) : "no-res"}`;
+              console.warn(`⚠️ MAIN alert FAILED — سيُعاد: ${lastSendErr}`);
+            }
           }
         }
       }
@@ -455,10 +471,16 @@ async function checkAlerts() {
         for (const t of [...recip.thresholds].sort((a, b) => a - b)) {
           const key = `${r.id}_${recip.id}_${t}`;
           if (mins >= t && !alerted[key]) {
-            await sendWA(recip.phone, buildMsg(t), senderInstance);
-            newAlerted[key] = Date.now();
-            alertsSent++;
-            console.log(`   📨 → ${recip.name} (${recip.phone}) t=${t}min [id=${r.id}]`);
+            const waRes = await sendWA(recip.phone, buildMsg(t), senderInstance);
+            if (waRes && waRes.ok) {
+              newAlerted[key] = Date.now();
+              alertsSent++;
+              console.log(`   📨 SENT → ${recip.name} (${recip.phone}) t=${t}min [id=${r.id}]`);
+            } else {
+              sendFailed++;
+              lastSendErr = `${recip.name} ${r.id}@${t}م: ${waRes ? (waRes.status || waRes.error) : "no-res"}`;
+              console.warn(`   ⚠️ FAILED → ${recip.name} — سيُعاد: ${lastSendErr}`);
+            }
           }
         }
       }
@@ -470,9 +492,18 @@ async function checkAlerts() {
     });
     await db.ref("alerted").set(newAlerted);
 
-    console.log(`✅ Total=${checked} Active=${activeFound} Alerts=${alertsSent}`);
+    // نبضة السيرفر (مفتاح رجل ميت) — التطبيق يراقبها وينبّه لو السيرفر صمت أو فشل إرسال
+    await db.ref("reports2/_alertHeartbeat").set({
+      at: Date.now(),
+      active: activeFound,
+      alertsSent,
+      sendFailed,
+      lastError: lastSendErr || null,
+    }).catch((e) => console.warn("heartbeat write failed:", e.message));
+
+    console.log(`✅ Total=${checked} Active=${activeFound} Alerts=${alertsSent} Failed=${sendFailed}`);
     return {
-      ok: true, total: checked, active: activeFound, alertsSent,
+      ok: true, total: checked, active: activeFound, alertsSent, sendFailed, lastError: lastSendErr || null,
       sources: {
         reports: Object.keys(oldReports).length,
         reports2_outages: Object.keys(newReports).length,
@@ -481,6 +512,8 @@ async function checkAlerts() {
   } catch (e) {
     console.error("❌ Error in checkAlerts:", e.message);
     return { ok: false, error: e.message };
+  } finally {
+    _checkRunning = false;
   }
 }
 
