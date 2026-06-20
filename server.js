@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// طاقة (TAQA) - Alert Server  v4.4-webpush (آخر إصدار)
+// طاقة (TAQA) - Alert Server  v5.0-webpush (آخر إصدار)
 // + المحطات الإضافية في رسالة التنبيه
 // + احتياطي تلقائي للرقم الرئيسي لو فشل رقم المرسِل
 // + استعادة كلمة المرور عبر واتساب (صيغة OTP)
@@ -10,6 +10,9 @@
 // + توحيد أيقونات رسائل التنبيه (⭐)
 // + تنبيه تكرار المغذي الفوري + زر اختبار الواتساب (v4.0)
 // + إيقاف/تشغيل تنبيه المستلم للإجازات — تخطّي paused (v4.1)
+// + صفر ضياع: تعليم «مُرسل» فقط عند نجاح الواتساب + إعادة المحاولة (v5.0)
+// + قفل تزامن checkAlerts + نبضة _alertHeartbeat (مفتاح رجل ميت) (v5.0)
+// + مثلث أحمر 🔺 موحّد لكل عتبات التنبيه (v5.0)
 // ═══════════════════════════════════════════════════════════
 
 const express = require("express");
@@ -520,7 +523,7 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "v4.4-webpush",
+    version: "v5.0-webpush",
     time: new Date().toISOString(),
     features: [
       "✅ Per-recipient custom alert thresholds (dynamic)",
@@ -1204,7 +1207,7 @@ function startWebPush() {
 }
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server v4.4-webpush running on port ${PORT}`);
+  console.log(`🚀 Server v5.0-webpush running on port ${PORT}`);
   console.log(`🌍 Timezone: Asia/Riyadh (UTC+3)`);
   console.log(`📱 Per-recipient custom alert thresholds`);
   console.log(`📞 WA_TARGET: ${WA_TARGET || "(not set)"}`);
