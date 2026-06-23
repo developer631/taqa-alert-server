@@ -34,7 +34,7 @@ app.use((req, res, next) => {
 const PORT = process.env.PORT || 3000;
 
 // إصدار تطبيق طاقة (PWA) المتوافق مع هذا السيرفر — يُحدّث مع كل نشر للتطبيق
-const APP_VERSION = process.env.APP_VERSION || "v166";
+const APP_VERSION = process.env.APP_VERSION || "v167";
 const SERVER_VERSION = "v5.0-webpush";
 
 let db = null;
