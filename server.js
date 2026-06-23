@@ -33,6 +33,10 @@ app.use((req, res, next) => {
 
 const PORT = process.env.PORT || 3000;
 
+// إصدار تطبيق طاقة (PWA) المتوافق مع هذا السيرفر — يُحدّث مع كل نشر للتطبيق
+const APP_VERSION = process.env.APP_VERSION || "v166";
+const SERVER_VERSION = "v5.0-webpush";
+
 let db = null;
 try {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -523,7 +527,8 @@ async function checkAlerts() {
 app.get("/", (req, res) => {
   res.json({
     status: "✅ طاقة Alert Server running",
-    version: "v5.0-webpush",
+    version: SERVER_VERSION,
+    app_version: APP_VERSION,
     time: new Date().toISOString(),
     features: [
       "✅ Per-recipient custom alert thresholds (dynamic)",
@@ -543,6 +548,8 @@ app.get("/config", (req, res) => {
     WAWP_TOKEN: WAWP_TOKEN ? "✅ set" : "❌ missing",
     WA_TARGET: WA_TARGET || "❌ missing",
     FIREBASE: db ? "✅ connected" : "❌ not connected",
+    app_version: APP_VERSION,
+    server_version: SERVER_VERSION,
     paths: ["reports/", "reports2/outages/"],
     alert_thresholds: ALERT_THRESHOLDS,
     timezone: "Asia/Riyadh (UTC+3)",
@@ -1207,7 +1214,7 @@ function startWebPush() {
 }
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server v5.0-webpush running on port ${PORT}`);
+  console.log(`🚀 Server ${SERVER_VERSION} (متوافق مع تطبيق ${APP_VERSION}) running on port ${PORT}`);
   console.log(`🌍 Timezone: Asia/Riyadh (UTC+3)`);
   console.log(`📱 Per-recipient custom alert thresholds`);
   console.log(`📞 WA_TARGET: ${WA_TARGET || "(not set)"}`);
